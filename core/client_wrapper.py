@@ -231,7 +231,43 @@ class PredictFunClient:
         order_type: str = "MARKET",  # "MARKET" | "LIMIT"
     ) -> dict | None:
         if config.PAPER_TRADING:
-            return {"status": "matched", "paper": True, "price": price, "size": size_usdt}
+            # ── 현실적 페이퍼: 실제 오더북 + 슬리피지 + 수수료 반영 ──
+            bps = slippage_bps if slippage_bps is not None else config.DEFAULT_SLIPPAGE_BPS
+
+            # 실제 오더북 호가 조회
+            actual_price = price
+            try:
+                ob = self.get_orderbook(market_id)
+                if ob:
+                    levels = ob.get("asks" if side == 0 else "bids", [])
+                    if levels:
+                        lv = levels[0]
+                        actual_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price", price))
+            except Exception:
+                pass  # 조회 실패 시 whale 가격 fallback
+
+            # 슬리피지 적용 (BUY: 가격 상승, SELL: 가격 하락)
+            if side == 0:
+                actual_price = min(actual_price * (1 + bps / 10_000), 0.99)
+            else:
+                actual_price = max(actual_price * (1 - bps / 10_000), 0.01)
+
+            # 수수료 차감 (마켓별 feeRateBps, 기본 150bps=1.5%)
+            fee_bps = 150
+            try:
+                mkt = self.get_market(market_id)
+                fee_bps = int((mkt or {}).get("feeRateBps", 150))
+            except Exception:
+                pass
+            fee = size_usdt * fee_bps / 10_000
+
+            return {
+                "status": "matched",
+                "paper": True,
+                "price": actual_price,
+                "size": size_usdt - fee,
+                "fee": fee,
+            }
 
         if not self.authenticated:
             print("[Client][WARN] 인증 정보 없음")

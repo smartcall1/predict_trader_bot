@@ -94,6 +94,7 @@ class WhaleWatcher:
         self._recent_lock    = threading.Lock()
         self._last_cursor    = None   # 페이지네이션 커서 (중복 방지)
         self._seen_order_ids: set = set()  # 추가 중복 방어
+        self._warmup         = True   # 첫 폴링: dedup 등록만, 거래 처리 없음
 
         self._session = requests.Session()
         retry = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
@@ -157,6 +158,14 @@ class WhaleWatcher:
             items  = body.get("data", [])
             cursor = body.get("cursor")
 
+            # 첫 폴링: dedup ID만 등록하고 처리는 스킵 (시작 직전 거래 복사 방지)
+            if self._warmup:
+                for item in reversed(items):
+                    self._process_match(item, dry_run=True)
+                self._warmup = False
+                print(f"[WhaleMgr] 워밍업 완료 ({len(items)}건 스킵) — 다음 폴링부터 처리")
+                return
+
             new_count = 0
             for item in reversed(items):  # 오래된 것부터 처리
                 self._process_match(item)
@@ -172,7 +181,7 @@ class WhaleWatcher:
         except Exception as e:
             print(f"[WhaleMgr][ERR] _fetch_matches: {e}")
 
-    def _process_match(self, item: dict):
+    def _process_match(self, item: dict, dry_run: bool = False):
         """
         체결 데이터 파싱 → 고래 등록 + 메인 봇 전달
         응답 구조:
@@ -217,6 +226,9 @@ class WhaleWatcher:
         self._seen_order_ids.add(dedup_key)
         if len(self._seen_order_ids) > 10000:
             self._seen_order_ids = set(list(self._seen_order_ids)[-5000:])
+
+        if dry_run:
+            return  # 워밍업: 중복 등록만, 거래 처리/콜백 없음
 
         if not addr or not market_id:
             return

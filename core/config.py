@@ -42,7 +42,7 @@ class Config:
     STOP_LOSS_PCT       = float(os.getenv("STOP_LOSS_PCT", "0.40"))   # 40% 손절
     MIN_WHALE_SIZE_USDT = float(os.getenv("MIN_WHALE_SIZE_USDT", "500.0"))  # 고래 최소 거래액
     MIN_PRICE           = float(os.getenv("MIN_PRICE", "0.10"))        # 극초저확률 차단
-    MAX_PRICE           = float(os.getenv("MAX_PRICE", "0.93"))        # 정산 직전 차단
+    MAX_PRICE           = float(os.getenv("MAX_PRICE", "0.85"))        # 정산 직전 차단 (0.85 초과 = 이미 한쪽 확정 가능성)
     DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS", "300"))  # 슬리피지 bps (300 = 3%)
 
     # 고래 스코어링 최소 기준

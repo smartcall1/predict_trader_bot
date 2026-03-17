@@ -223,7 +223,9 @@ class PredictCopyBot:
             print(f"[Bot][WARN] 주문 미체결 (status={status}) → 취소")
             return
 
-        shares = bet_size / price if price > 0 else 0
+        # 실제 체결가 사용 (paper 시 오더북+슬리피지+수수료 반영된 가격)
+        exec_price = float(result.get("price") or price)
+        shares = bet_size / exec_price if exec_price > 0 else 0
         pos_key = f"{market_id}_{whale_addr[:8]}_{int(time.time())}"
 
         with self._position_lock:
@@ -231,8 +233,8 @@ class PredictCopyBot:
                 "marketId": market_id,
                 "whale_addr": whale_addr,
                 "whale_name": whale_name,
-                "entry_price": price,
-                "current_price": price,
+                "entry_price": exec_price,
+                "current_price": exec_price,
                 "size_usdc": bet_size,
                 "shares": shares,
                 "opened_at": int(time.time()),
@@ -244,11 +246,15 @@ class PredictCopyBot:
         self._save_state()
         self._log_trade("OPEN", pos_key, price, 0)
 
+        fee_paid = result.get("fee", 0)
+        price_diff = exec_price - price
+        slip_info = f" (고래:{price:.3f}→체결:{exec_price:.3f})" if abs(price_diff) > 0.001 else ""
         tg_notifier.send_message(
             f"🟢 <b>진입 [{('PAPER' if config.PAPER_TRADING else 'LIVE')}]</b>\n"
             f"🐳 {whale_name}\n"
             f"📊 {(market.get('question') or market_id)[:40]}\n"
-            f"💵 ${bet_size:.2f} @ {price:.3f}\n"
+            f"💵 ${bet_size:.2f} @ {exec_price:.3f}{slip_info}\n"
+            f"💸 수수료: ${fee_paid:.2f}\n"
             f"📌 포지션: {len(self.positions)}개"
         )
 
