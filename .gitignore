@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+.env.test
+
+# Logs
+logs/
+*.log
+
+# Project specific
+.stop_bot
+data/
+
+# IDE
+.vscode/
+.idea/
+.omc/
+
+# System
+.DS_Store
+Thumbs.db
