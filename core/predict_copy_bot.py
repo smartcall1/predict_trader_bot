@@ -228,6 +228,12 @@ class PredictCopyBot:
         shares = bet_size / exec_price if exec_price > 0 else 0
         pos_key = f"{market_id}_{whale_addr[:8]}_{int(time.time())}"
 
+        market_name = (
+            market.get("question") or market.get("title") or
+            market.get("name") or market.get("description") or
+            market.get("marketQuestion") or str(market_id)
+        )
+
         with self._position_lock:
             self.positions[pos_key] = {
                 "marketId": market_id,
@@ -238,7 +244,7 @@ class PredictCopyBot:
                 "size_usdc": bet_size,
                 "shares": shares,
                 "opened_at": int(time.time()),
-                "question": market.get("question") or market.get("title") or market_id[:30],
+                "question": market_name,
             }
 
         self.bankroll -= bet_size
@@ -252,7 +258,7 @@ class PredictCopyBot:
         tg_notifier.send_message(
             f"🟢 <b>진입 [{('PAPER' if config.PAPER_TRADING else 'LIVE')}]</b>\n"
             f"🐳 {whale_name}\n"
-            f"📊 {(market.get('question') or market_id)[:40]}\n"
+            f"📊 {market_name[:40]}\n"
             f"💵 ${bet_size:.2f} @ {exec_price:.3f}{slip_info}\n"
             f"💸 수수료: ${fee_paid:.2f}\n"
             f"📌 포지션: {len(self.positions)}개"

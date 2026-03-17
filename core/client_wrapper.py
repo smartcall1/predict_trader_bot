@@ -132,7 +132,8 @@ class PredictFunClient:
         try:
             r = self.session.get(f"{self.api_base}/v1/markets/{market_id}", timeout=10)
             r.raise_for_status()
-            return r.json()
+            raw = r.json()
+            return raw.get("data", raw)
         except Exception as e:
             print(f"[Client][ERR] get_market({market_id}): {e}")
             return None
