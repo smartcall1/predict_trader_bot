@@ -549,6 +549,24 @@ class PredictCopyBot:
         except Exception as e:
             print(f"[Bot][WARN] 거래 내역 전송 실패: {e}")
 
+    def _resolve_question(self, pos: dict) -> str:
+        """question 필드가 비어있거나 순수 숫자(=과거 market_id 저장 버그)면 API 재조회"""
+        q = pos.get("question", "")
+        if q and not str(q).strip().lstrip("-").isdigit():
+            return q
+        market_id = pos.get("marketId", "")
+        if market_id:
+            try:
+                market = self.client.get_market(str(market_id))
+                if market:
+                    name = (market.get("question") or market.get("title") or
+                            market.get("name") or str(market_id))
+                    pos["question"] = name  # 캐시
+                    return name
+            except Exception:
+                pass
+        return str(market_id) or "unknown"
+
     def _send_telegram_positions(self):
         try:
             if not self.positions:
@@ -561,7 +579,8 @@ class PredictCopyBot:
                 unr = (cur - pos["entry_price"]) * pos.get("shares", 0)
                 total_unrealized += unr
                 icon = "📈" if unr >= 0 else "📉"
-                rows.append(f"{icon} {pos.get('question','')[:25]} | {unr:+.2f}")
+                label = self._resolve_question(pos)
+                rows.append(f"{icon} {label[:25]} | {unr:+.2f}")
             msg = (f"📌 <b>포지션 ({len(self.positions)}개)</b>\n" +
                    "\n".join(rows) +
                    f"\n─────\n미실현 합계: ${total_unrealized:+.2f}")
