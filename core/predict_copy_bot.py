@@ -133,6 +133,7 @@ class PredictCopyBot:
 
         # ── 백로그 차단 ──
         if self._startup_time and ts < self._startup_time:
+            print(f"[Bot][DBG] 백로그 차단: ts={ts} startup={self._startup_time}")
             return
 
         # ── Filter 1: BUY만 복사 (SELL은 MIRROR EXIT 체크) ──
