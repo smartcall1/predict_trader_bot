@@ -230,20 +230,34 @@ class PredictFunClient:
         size_usdt: float,    # USDT 금액
         slippage_bps: int | None = None,
         order_type: str = "MARKET",  # "MARKET" | "LIMIT"
+        outcome_name: str = "",      # "Yes"/"No"/"Lakers" 등 결과물 이름
+        token_id: str = "",          # 온체인 토큰 ID (live 모드에서 사용)
     ) -> dict | None:
         if config.PAPER_TRADING:
             # ── 현실적 페이퍼: 실제 오더북 + 슬리피지 + 수수료 반영 ──
             bps = slippage_bps if slippage_bps is not None else config.DEFAULT_SLIPPAGE_BPS
+            _is_no = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
 
             # 실제 오더북 호가 조회
+            # No 결과물: BUY→(1-best_bid), SELL→(1-best_ask)
+            # Yes 결과물: BUY→best_ask, SELL→best_bid
             actual_price = price
             try:
                 ob = self.get_orderbook(market_id)
                 if ob:
-                    levels = ob.get("asks" if side == 0 else "bids", [])
-                    if levels:
-                        lv = levels[0]
-                        actual_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price", price))
+                    if _is_no:
+                        ref_key = "bids" if side == 0 else "asks"
+                        levels = ob.get(ref_key, [])
+                        if levels:
+                            lv = levels[0]
+                            ref = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price", 0))
+                            if ref > 0:
+                                actual_price = max(1.0 - ref, 0.01)
+                    else:
+                        levels = ob.get("asks" if side == 0 else "bids", [])
+                        if levels:
+                            lv = levels[0]
+                            actual_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price", price))
             except Exception:
                 pass  # 조회 실패 시 whale 가격 fallback
 
@@ -287,19 +301,30 @@ class PredictFunClient:
             print(f"[Client][ERR] 마켓 정보 없음: {market_id}")
             return None
 
-        # token_id = outcomes[N].onChainId (YES/UP outcome 우선)
-        outcomes = market.get("outcomes", [])
-        yes_outcome = next(
-            (o for o in outcomes if o.get("name", "").upper() in ("YES", "UP", "ABOVE")),
-            outcomes[0] if outcomes else None,
-        )
-        token_id     = yes_outcome.get("onChainId") if yes_outcome else None
+        # token_id: 고래 거래의 토큰 우선 → outcome_name 이름 매칭 → YES/UP/ABOVE fallback
+        outcomes     = market.get("outcomes", [])
         fee_rate_bps = int(market.get("feeRateBps") or 0)
         precision    = int(market.get("decimalPrecision") or DEFAULT_PRECISION)
 
-        if not token_id:
+        resolved_token_id = token_id or None
+        if not resolved_token_id and outcome_name:
+            matched = next(
+                (o for o in outcomes if o.get("name", "").upper() == outcome_name.upper()),
+                None,
+            )
+            if matched:
+                resolved_token_id = matched.get("onChainId")
+        if not resolved_token_id:
+            yes_outcome = next(
+                (o for o in outcomes if o.get("name", "").upper() in ("YES", "UP", "ABOVE")),
+                outcomes[0] if outcomes else None,
+            )
+            resolved_token_id = yes_outcome.get("onChainId") if yes_outcome else None
+
+        if not resolved_token_id:
             print(f"[Client][ERR] token_id(onChainId) 없음 — outcomes: {outcomes}")
             return None
+        token_id = resolved_token_id
 
         # OrderBuilder precision을 마켓별로 동기화
         if self.builder:

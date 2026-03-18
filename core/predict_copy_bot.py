@@ -59,6 +59,12 @@ class PredictCopyBot:
         self.client  = PredictFunClient()
         self.scorer  = WhaleScorer()
 
+        # 시작 시 고래 DB 카운트 초기화 (6시간 대기 없이 즉시 표시)
+        try:
+            self._active_whale_count = len(load_whales_db())
+        except Exception:
+            pass
+
         # WebSocket 고래 탐지 시작
         self.watcher = run_manager(self.client)
 
@@ -106,13 +112,15 @@ class PredictCopyBot:
 
     def _handle_whale_trade(self, trade: dict):
         """WebSocket으로 감지된 고래 거래 → 복사 매매 판단"""
-        addr      = trade.get("address", "")
-        market_id = trade.get("marketId", "")
-        side      = trade.get("side", "")
-        price     = float(trade.get("price") or 0)
-        size_usdt = float(trade.get("size_usdt") or 0)
-        tx_hash   = trade.get("transactionHash", "")
-        ts        = trade.get("timestamp", int(time.time()))
+        addr         = trade.get("address", "")
+        market_id    = trade.get("marketId", "")
+        side         = trade.get("side", "")
+        price        = float(trade.get("price") or 0)
+        size_usdt    = float(trade.get("size_usdt") or 0)
+        tx_hash      = trade.get("transactionHash", "")
+        ts           = trade.get("timestamp", int(time.time()))
+        outcome_name = trade.get("outcome_name", "")   # "Yes"/"No"/"Lakers" 등
+        token_id     = trade.get("token_id", "")       # 온체인 토큰 ID
 
         # ── 중복 방어 ──
         if tx_hash and tx_hash in self.seen_txs:
@@ -155,10 +163,13 @@ class PredictCopyBot:
             score = whale_info.get("score", 0)
             if score > 0 and score < 0.2:
                 return
-            # [Fix5] 미평가 고래(score=0): 스코어링 데이터 없으므로 완전 차단
+            # [Fix5] 미평가 고래(score=0): 고거래량 고래만 임시 허용 (스코어링 데이터 부족 기간)
             if score == 0:
-                print(f"[Bot] [SKIP] 미평가 고래 차단 (score=0): {addr[:8]}")
-                return
+                vol = whale_info.get("total_volume", 0)
+                obs = whale_info.get("total_trades", 0)
+                if vol < 50000 or obs < 50:
+                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}, trades={obs}): {addr[:8]}")
+                    return
         else:
             # DB에 없는 완전 신규 고래 → 현재 거래 크기로 판단
             if size_usdt < config.MIN_WHALE_SIZE_USDT * 2:
@@ -208,11 +219,14 @@ class PredictCopyBot:
             print(f"[Bot] [SKIP] 스프레드 {spread:.1%} 과다: {market_id[:12]}...")
             return
         # 현재 오더북 ask vs 고래 거래가 25% 이상 이탈 → stale trade 차단
+        # No/Down 결과물은 "1 - best_bid"가 실제 진입가이므로 bids 기준으로 계산
+        _is_no_outcome = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
         if ob:
-            asks = ob.get("asks", [])
-            if asks:
-                lv = asks[0]
-                raw_ask = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
+            ref_levels = ob.get("bids", []) if _is_no_outcome else ob.get("asks", [])
+            if ref_levels:
+                lv = ref_levels[0]
+                ref_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
+                raw_ask = max(1.0 - ref_price, 0.01) if _is_no_outcome else ref_price
                 if raw_ask > 0:
                     if raw_ask > config.MAX_PRICE:
                         print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
@@ -231,8 +245,8 @@ class PredictCopyBot:
             return
 
         whale_name = (whale_info or {}).get("name", addr[:8])
-        print(f"[Bot] 🐳 복사 진입: {whale_name} | {market_id[:12]}... | ${bet_size:.2f} @ {price:.3f}")
-        self._execute_trade(market_id, market, price, bet_size, addr, whale_name)
+        print(f"[Bot] 🐳 복사 진입: {whale_name} | {outcome_name} | {market_id[:12]}... | ${bet_size:.2f} @ {price:.3f}")
+        self._execute_trade(market_id, market, price, bet_size, addr, whale_name, outcome_name, token_id)
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
         """고래 SELL 감지 → 동일 마켓 포지션 조기 청산 (어떤 고래든 해당 마켓 SELL이면 검토)"""
@@ -251,13 +265,16 @@ class PredictCopyBot:
     # ──────────────────────────────────────────────
 
     def _execute_trade(self, market_id: str, market: dict, price: float,
-                        bet_size: float, whale_addr: str, whale_name: str):
+                        bet_size: float, whale_addr: str, whale_name: str,
+                        outcome_name: str = "", token_id: str = ""):
         """BUY 주문 실행"""
         result = self.client.place_order(
             market_id=market_id,
             side=0,  # BUY
             price=price,
             size_usdt=bet_size,
+            outcome_name=outcome_name,
+            token_id=token_id,
         )
         if not result:
             print(f"[Bot][WARN] 주문 실패: {market_id[:12]}...")
@@ -295,6 +312,8 @@ class PredictCopyBot:
                 "shares": shares,
                 "opened_at": int(time.time()),
                 "question": market_name,
+                "outcome_name": outcome_name,
+                "token_id": token_id,
             }
 
         self.bankroll -= bet_size
@@ -323,6 +342,8 @@ class PredictCopyBot:
             side=1,  # SELL
             price=sell_price,
             size_usdt=shares * sell_price,
+            outcome_name=pos.get("outcome_name", ""),
+            token_id=pos.get("token_id", ""),
         )
 
         # PnL 계산
@@ -391,8 +412,13 @@ class PredictCopyBot:
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
-                # 손절 체크
-                current = self.client.get_best_price(pos["marketId"], side="SELL")
+                # 손절 체크 (No 결과물: 현재가 = 1 - YES ask)
+                _pos_is_no = pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
+                if _pos_is_no:
+                    yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
+                    current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
+                else:
+                    current = self.client.get_best_price(pos["marketId"], side="SELL")
                 if current is not None:
                     pos["current_price"] = current
                     drop = (pos["entry_price"] - current) / pos["entry_price"]
