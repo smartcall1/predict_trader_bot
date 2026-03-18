@@ -164,10 +164,11 @@ class PredictCopyBot:
             if score > 0 and score < 0.2:
                 return
             # [Fix5] 미평가 고래(score=0): 고거래량 고래만 임시 허용 (스코어링 데이터 부족 기간)
+            # 기준: 누적 거래량 $50K 이상 OR 거래 10건 이상 (둘 다 충족 필요)
             if score == 0:
                 vol = whale_info.get("total_volume", 0)
                 obs = whale_info.get("total_trades", 0)
-                if vol < 50000 or obs < 50:
+                if vol < 50000 or obs < 10:
                     print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}, trades={obs}): {addr[:8]}")
                     return
         else:
