@@ -168,7 +168,7 @@ class PredictCopyBot:
             if score == 0:
                 vol = whale_info.get("total_volume", 0)
                 obs = whale_info.get("total_trades", 0)
-                if vol < 50000 or obs < 10:
+                if vol < 5000 or obs < 5:
                     print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}, trades={obs}): {addr[:8]}")
                     return
         else:
