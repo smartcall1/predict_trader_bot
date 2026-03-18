@@ -37,8 +37,8 @@ class Config:
     INITIAL_BANKROLL = float(os.getenv("INITIAL_BANKROLL", "1000.0"))  # USDT 기준
 
     # === 고래봇 설정 ===
-    MAX_POSITIONS       = int(os.getenv("MAX_POSITIONS", "20"))
-    BET_DIVISOR         = int(os.getenv("BET_DIVISOR", "20"))         # 포트폴리오 / 분모 = 1회 베팅
+    MAX_POSITIONS       = int(os.getenv("MAX_POSITIONS", "30"))        # [Fix4] 20→30
+    BET_DIVISOR         = int(os.getenv("BET_DIVISOR", "40"))         # [Fix4] 20→40 (포트폴리오 2.5% 베팅)
     STOP_LOSS_PCT       = float(os.getenv("STOP_LOSS_PCT", "0.40"))   # 40% 손절
     MIN_WHALE_SIZE_USDT = float(os.getenv("MIN_WHALE_SIZE_USDT", "500.0"))  # 고래 최소 거래액
     MIN_PRICE           = float(os.getenv("MIN_PRICE", "0.10"))        # 극초저확률 차단

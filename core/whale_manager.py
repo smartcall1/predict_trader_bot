@@ -143,6 +143,9 @@ class WhaleWatcher:
         """
         min_wei = str(int(config.MIN_WHALE_SIZE_USDT * WEI))
         params  = {"first": 50, "minValueUsdtWei": min_wei}
+        # [Fix3] cursor 실제 전달 — 이미 본 거래 재처리 방지
+        if self._last_cursor:
+            params["after"] = self._last_cursor
 
         try:
             r = self._session.get(

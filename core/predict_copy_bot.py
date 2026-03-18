@@ -148,19 +148,31 @@ class PredictCopyBot:
         whale_info = db.get(addr)
         if whale_info:
             score = whale_info.get("score", 0)
-            # score > 0: 스코어링 완료 → 기준 미달이면 스킵
-            # score = 0: 아직 미평가 (신규 고래) → 크기 기준으로 통과 허용
             if score > 0 and score < 0.2:
                 return
+            # [Fix5] 미평가 고래(score=0): 누적 거래량 $2000 미만이면 차단
+            if score == 0 and whale_info.get("total_volume", 0) < 2000:
+                print(f"[Bot] [SKIP] 미평가 소량 고래 차단 (vol=${whale_info.get('total_volume',0):.0f}): {addr[:8]}")
+                return
+        else:
+            # DB에 없는 완전 신규 고래 → 현재 거래 크기로 판단
+            if size_usdt < config.MIN_WHALE_SIZE_USDT * 2:
+                return
 
-        # ── Filter 5: market_signal 중복 방어 ──
-        sig_key = f"{market_id}:{side_upper}:{addr}"
+        # ── Filter 5: 동일 마켓 중복 진입 차단 ──
+        # [Fix1-A] 이미 같은 마켓 포지션 보유 중이면 고래 무관하게 차단
+        if any(p.get("marketId") == market_id for p in self.positions.values()):
+            print(f"[Bot] [SKIP] 동일 마켓 중복 차단: {market_id[:12]}...")
+            return
+
+        # [Fix1-B] addr 제외한 마켓+방향 키로 30분 TTL 중복 방어
+        sig_key = f"{market_id}:{side_upper}"
         now = int(time.time())
-        if now - self._seen_market_signals.get(sig_key, 0) < 300:
+        if now - self._seen_market_signals.get(sig_key, 0) < 1800:
             return
         self._seen_market_signals[sig_key] = now
         if len(self._seen_market_signals) > 500:
-            cutoff = now - 600
+            cutoff = now - 3600
             self._seen_market_signals = {
                 k: v for k, v in self._seen_market_signals.items() if v > cutoff
             }
@@ -169,7 +181,17 @@ class PredictCopyBot:
         market = self.client.get_market(market_id)
         if not market:
             return
-        # TODO: 마켓 resolved/closed 체크 (필드명 확인 필요)
+
+        # [Fix2-DEBUG] 마켓 필드 구조 확인용 — logs/market_debug.jsonl 에 누적 저장
+        try:
+            import json as _json
+            _debug_path = os.path.join(config.LOGS_DIR, "market_debug.jsonl")
+            _fields = {k: v for k, v in market.items() if k not in ("outcomes",)}
+            with open(_debug_path, "a", encoding="utf-8") as _df:
+                _df.write(_json.dumps({"market_id": market_id, "fields": _fields}, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
+
         if market.get("resolved") or market.get("status") in ("resolved", "closed"):
             return
 
