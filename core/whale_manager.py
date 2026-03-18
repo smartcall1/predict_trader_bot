@@ -168,8 +168,7 @@ class WhaleWatcher:
                 for item in reversed(items):
                     self._process_match(item, dry_run=True)
                 self._warmup = False
-                if cursor:
-                    self._last_cursor = cursor  # 커서 설정 → 2번째 폴링도 같은 50건 재조회 방지
+                self._last_cursor = None  # cursor 미사용 — 매번 최신 50건 조회
                 print(f"[WhaleMgr] 워밍업 완료 ({len(items)}건 스킵) — 다음 폴링부터 처리")
                 return
 
@@ -181,9 +180,8 @@ class WhaleWatcher:
             if new_count:
                 print(f"[WhaleMgr] 대형 거래 {new_count}건 처리")
 
-            # cursor 갱신 (다음 폴링에서 이미 본 것 건너뜀)
-            if cursor:
-                self._last_cursor = cursor
+            # cursor 미사용 — 매번 최신 50건 조회 (_seen_order_ids dedup으로 중복 방지)
+            # after=cursor 는 시간 역방향 페이지네이션이므로 새 거래를 놓침
 
         except Exception as e:
             print(f"[WhaleMgr][ERR] _fetch_matches: {e}")
