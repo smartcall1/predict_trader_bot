@@ -111,17 +111,21 @@ class WhaleScorer:
             print(f"[Scorer][ERR] fetch_trader_history({address[:8]}...) 실패: {e}")
             return []
 
-    def score_whale(self, address: str, trades: list) -> dict | None:
+    def score_whale(self, address: str, trades: list, whale_info: dict = None) -> dict | None:
         """
-        거래 내역으로 고래 점수 계산
-        Polymarket scorer와 동일 알고리즘
+        거래 내역으로 고래 점수 계산 (Polymarket 고급 로직 적용)
+        - confidence 보정 (소샘플 비례 할인)
+        - win_score 하한 65% 상향 (50%→65%)
+        - ROI 로그 스케일 (200% 만점)
+        - recency_penalty 4단계
+        - activity_penalty (비활동 기간 기반)
+        - 헷징/MM 필터 (고승률+저ROI 차단)
         """
         if len(trades) < config.MIN_TRADES:
             return None
 
         resolved = [t for t in trades if t.get("action") in ("WIN", "LOSS", "STOP_LOSS")]
         if len(resolved) < config.MIN_TRADES:
-            # WebSocket으로 수집한 데이터는 action 필드 없을 수 있음 → 대안 로직
             resolved = trades
 
         wins   = sum(1 for t in resolved if t.get("pnl", 0) > 0 or t.get("action") == "WIN")
@@ -131,69 +135,141 @@ class WhaleScorer:
             return None
 
         win_rate = wins / total * 100
-        if win_rate < config.MIN_WIN_RATE:
-            return None
 
-        total_pnl = sum(float(t.get("pnl", 0)) for t in resolved)
+        total_pnl      = sum(float(t.get("pnl", 0)) for t in resolved)
         total_invested = sum(float(t.get("size_usdt", t.get("size", 0))) for t in resolved)
         roi = (total_pnl / total_invested * 100) if total_invested > 0 else 0
-        if roi > 5000:  # 이상치 제거
+        if roi > 5000:
             return None
 
-        # 30일 내 거래 빈도
-        cutoff_30 = time.time() - 30 * 86400
-        recent_20 = [
-            t for t in trades
+        # 30일 내 거래 빈도 (월 50회 기준)
+        cutoff_30     = time.time() - 30 * 86400
+        recent_trades = [t for t in trades if (t.get("timestamp", 0) or 0) >= cutoff_30]
+        freq_score    = min(len(recent_trades) / 50.0, 1.0)
+
+        # confidence 보정: resolved 20건 미만 → 비례 할인 (소샘플 고래 점수 과대 방지)
+        confidence = min(total / 20.0, 1.0)
+
+        # win_score: 65% 이하 0점, 90% 이상 만점 (저승률 고래 차별화)
+        win_score = max(0.0, min((win_rate - 65.0) / 25.0, 1.0))
+
+        # ROI 로그 스케일 (200% 이상 만점, 소ROI 과대평가 방지)
+        if roi <= 0:
+            roi_score = 0.0
+        else:
+            roi_score = max(0.0, min(math.log1p(roi / 100.0) / math.log(3.0), 1.0))
+
+        # recency_penalty 4단계: 최근 정산 거래 WIN율 기준
+        recent_resolved = [
+            t for t in resolved
             if (t.get("timestamp", 0) or 0) >= cutoff_30
         ]
-        freq_score = min(len(recent_20) / 20, 1.0)
+        if len(recent_resolved) >= 10:
+            recent_wr = (
+                sum(1 for t in recent_resolved
+                    if t.get("pnl", 0) > 0 or t.get("action") == "WIN")
+                / len(recent_resolved) * 100
+            )
+            if recent_wr >= 85:
+                recency_penalty = 1.0
+            elif recent_wr >= 75:
+                recency_penalty = 0.75
+            elif recent_wr >= 65:
+                recency_penalty = 0.5
+            else:
+                recency_penalty = 0.25
+        else:
+            recent_wr       = None
+            recency_penalty = 0.8
 
-        # recency_penalty (Polymarket BUG FIX21과 동일)
-        recency_penalty = 1.0 if len(recent_20) >= 20 else 0.8
+        # activity_penalty: last_seen 기반 비활동 패널티
+        last_seen = (whale_info or {}).get("last_seen", 0) or 0
+        if last_seen:
+            days_inactive = (time.time() - last_seen) / 86400
+            if days_inactive <= 3:
+                activity_penalty = 1.0
+            elif days_inactive <= 7:
+                activity_penalty = 0.9
+            elif days_inactive <= 14:
+                activity_penalty = 0.7
+            else:
+                activity_penalty = 0.5
+        else:
+            days_inactive    = None
+            activity_penalty = 0.5
 
-        # 최종 점수
-        profit_score  = min(max(roi / 100, 0), 1.0)
-        wr_score      = (win_rate - 50) / 50 if win_rate > 50 else 0
-        composite = (
-            WEIGHT_PROFIT   * profit_score +
-            WEIGHT_WIN_RATE * wr_score +
+        raw_score = (
+            WEIGHT_PROFIT    * roi_score +
+            WEIGHT_WIN_RATE  * win_score +
             WEIGHT_FREQUENCY * freq_score
-        ) * recency_penalty
+        )
+        composite = raw_score * confidence * recency_penalty * activity_penalty
+
+        # 헷징/MM 필터: 고승률 + 저ROI = 방향성 없는 베팅 → 차단
+        if win_rate >= 60.0 and roi < 5.0 and total >= 20:
+            print(f"[Scorer] 헷징/MM: WR={win_rate:.1f}% 고승률 ROI={roi:.1f}% 저수익 → score=0")
+            composite = 0.0
 
         return {
-            "address": address,
-            "score": round(composite, 4),
-            "win_rate": round(win_rate, 1),
-            "roi": round(roi, 1),
-            "total_trades": len(trades),
-            "resolved_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "total_pnl": round(total_pnl, 2),
-            "recent_20_count": len(recent_20),
-            "updated_at": int(time.time()),
+            "address":          address,
+            "score":            round(composite, 4),
+            "win_rate":         round(win_rate, 1),
+            "roi":              round(roi, 1),
+            "total_trades":     len(trades),
+            "resolved_trades":  total,
+            "wins":             wins,
+            "losses":           losses,
+            "total_pnl":        round(total_pnl, 2),
+            "recent_count":     len(recent_trades),
+            "recent_wr":        round(recent_wr, 1) if recent_wr is not None else None,
+            "confidence":       round(confidence, 2),
+            "recency_penalty":  round(recency_penalty, 2),
+            "activity_penalty": round(activity_penalty, 2),
+            "updated_at":       int(time.time()),
         }
 
     def update_all(self):
-        """DB 전체 고래 점수 갱신"""
+        """DB 전체 고래 점수 갱신 + Pruning + status 자동판정"""
         db = self.load_db()
         if not db:
-            print("[Scorer] 고래 DB 비어있음 — WebSocket 탐지 대기 중")
+            print("[Scorer] 고래 DB 비어있음 — 탐지 대기 중")
             return
 
+        now_ts = int(time.time())
+
+        # ── Pruning: score<0.3 + 14일 이상 미활동 → DB 제거 ──────────────
+        PRUNE_SCORE = 0.3
+        PRUNE_AGE   = 14 * 86400
+        prune_targets = [
+            addr for addr, w in db.items()
+            if (now_ts - (w.get("last_seen") or 0)) > PRUNE_AGE
+            and (w.get("score") or 0) < PRUNE_SCORE
+        ]
+        for addr in prune_targets:
+            del db[addr]
+        if prune_targets:
+            print(f"[Scorer] Pruning: {len(prune_targets)}마리 부진 고래 제거 → 잔여 {len(db)}마리")
+
+        # ── 점수 갱신 ──────────────────────────────────────────────────────
         updated = 0
         for addr, whale in db.items():
             trades = self.fetch_trader_history(addr)
             if not trades:
-                # WebSocket으로 수집한 내부 trades 사용
                 trades = whale.get("trades", [])
-            result = self.score_whale(addr, trades)
+            result = self.score_whale(addr, trades, whale_info=whale)
             if result:
                 whale.update(result)
                 updated += 1
+                # status 자동판정: score≥0.6→active, <0.45→inactive, 그레이존 유지
+                score = result["score"]
+                if score >= 0.6:
+                    whale["status"] = "active"
+                elif score < 0.45:
+                    whale["status"] = "inactive"
 
         self.save_db(db)
-        print(f"[Scorer] {updated}/{len(db)} 고래 점수 갱신 완료")
+        active = sum(1 for w in db.values() if w.get("status") == "active")
+        print(f"[Scorer] {updated}/{len(db)} 고래 점수 갱신 | active={active}마리")
 
     def get_active_whales(self, min_score: float = 0.3) -> list:
         """점수 기준 이상 활성 고래 목록 반환"""
