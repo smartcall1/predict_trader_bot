@@ -167,9 +167,8 @@ class PredictCopyBot:
             # 기준: 누적 거래량 $50K 이상 OR 거래 10건 이상 (둘 다 충족 필요)
             if score == 0:
                 vol = whale_info.get("total_volume", 0)
-                obs = whale_info.get("total_trades", 0)
-                if vol < 5000 or obs < 5:
-                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}, trades={obs}): {addr[:8]}")
+                if vol < 5000:
+                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
             # DB에 없는 완전 신규 고래 → 현재 거래 크기로 판단
