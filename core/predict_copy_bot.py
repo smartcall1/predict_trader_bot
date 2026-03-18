@@ -376,6 +376,7 @@ class PredictCopyBot:
 
         self._save_state()
         self._log_trade(reason, pos_key, sell_price, pnl, pos)
+        self._record_whale_result(pos, pnl, reason)
 
         icon = "✅" if pnl >= 0 else "❌"
         tg_notifier.send_message(
@@ -383,6 +384,34 @@ class PredictCopyBot:
             f"📊 {pos.get('question', pos_key)[:40]}\n"
             f"💵 PnL: ${pnl:+.2f} | 잔고: ${self.bankroll:.2f}"
         )
+
+    def _record_whale_result(self, pos: dict, pnl: float, reason: str):
+        """포지션 결과를 고래 DB에 역기록 → 스코어 계산 활성화"""
+        from whale_manager import load_whales_db, save_whales_db
+        addr = pos.get("whale_addr", "")
+        if not addr:
+            return
+        try:
+            db = load_whales_db()
+            if addr not in db:
+                return
+            w = db[addr]
+            # 같은 marketId 거래 중 action 미기록 건에 결과 주입
+            market_id = pos.get("marketId", "")
+            for t in reversed(w.get("trades", [])):
+                if t.get("marketId") == market_id and "action" not in t:
+                    t["action"] = reason
+                    t["pnl"]    = round(pnl, 4)
+                    break
+            # 집계 업데이트
+            if pnl > 0:
+                w["wins"] = w.get("wins", 0) + 1
+            else:
+                w["losses"] = w.get("losses", 0) + 1
+            w["total_pnl"] = round(w.get("total_pnl", 0.0) + pnl, 4)
+            save_whales_db(db)
+        except Exception as e:
+            print(f"[Bot][WARN] 고래 결과 역기록 실패: {e}")
 
     # ──────────────────────────────────────────────
     # 포지션 정산
