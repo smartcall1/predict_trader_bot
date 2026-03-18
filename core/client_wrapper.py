@@ -253,11 +253,11 @@ class PredictFunClient:
             else:
                 actual_price = max(actual_price * (1 - bps / 10_000), 0.01)
 
-            # 수수료 차감 (마켓별 feeRateBps, 기본 150bps=1.5%)
-            fee_bps = 150
+            # 수수료 차감 (마켓별 feeRateBps, 기본 200bps=2%)
+            fee_bps = 200
             try:
                 mkt = self.get_market(market_id)
-                fee_bps = int((mkt or {}).get("feeRateBps", 150))
+                fee_bps = int((mkt or {}).get("feeRateBps", 200))
             except Exception:
                 pass
             fee = size_usdt * fee_bps / 10_000

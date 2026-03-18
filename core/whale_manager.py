@@ -96,6 +96,8 @@ class WhaleWatcher:
         self._seen_order_ids: set = set()  # 추가 중복 방어
         self._warmup         = True   # 첫 폴링: dedup 등록만, 거래 처리 없음
 
+        self._match_debug_count = 0  # maker/taker 방향 검증용 (처음 30건 저장)
+
         self._session = requests.Session()
         retry = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503, 504])
         self._session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -166,6 +168,8 @@ class WhaleWatcher:
                 for item in reversed(items):
                     self._process_match(item, dry_run=True)
                 self._warmup = False
+                if cursor:
+                    self._last_cursor = cursor  # 커서 설정 → 2번째 폴링도 같은 50건 재조회 방지
                 print(f"[WhaleMgr] 워밍업 완료 ({len(items)}건 스킵) — 다음 폴링부터 처리")
                 return
 
@@ -198,6 +202,18 @@ class WhaleWatcher:
         size_usdt   = amount_wei / WEI
         if size_usdt < config.MIN_WHALE_SIZE_USDT:
             return
+
+        # [디버그] 처음 30건 raw 응답 저장 — maker/taker 방향(quoteType) 검증용
+        # logs/match_debug.jsonl 확인 후 side 로직 이상 없으면 이 블록 제거 가능
+        if not dry_run and self._match_debug_count < 30:
+            try:
+                _dp = os.path.join(config.LOGS_DIR, "match_debug.jsonl")
+                with open(_dp, "a", encoding="utf-8") as _f:
+                    _f.write(json.dumps({"n": self._match_debug_count, "item": item},
+                                        ensure_ascii=False, default=str) + "\n")
+                self._match_debug_count += 1
+            except Exception:
+                pass
 
         makers = item.get("makers", [])
         if not makers:
