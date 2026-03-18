@@ -143,6 +143,11 @@ class PredictCopyBot:
         if price < config.MIN_PRICE or price > config.MAX_PRICE:
             return
 
+        # ── Filter 3.5: 0.50~0.60 구간 차단 (수익성 불명확 구간) ──
+        if 0.50 <= price <= 0.60:
+            print(f"[Bot] [SKIP] 0.50~0.60 가격 구간 차단: {price:.3f}")
+            return
+
         # ── Filter 4: 고래 스코어 확인 ──
         db = load_whales_db()
         whale_info = db.get(addr)
@@ -150,9 +155,9 @@ class PredictCopyBot:
             score = whale_info.get("score", 0)
             if score > 0 and score < 0.2:
                 return
-            # [Fix5] 미평가 고래(score=0): 누적 거래량 $2000 미만이면 차단
-            if score == 0 and whale_info.get("total_volume", 0) < 2000:
-                print(f"[Bot] [SKIP] 미평가 소량 고래 차단 (vol=${whale_info.get('total_volume',0):.0f}): {addr[:8]}")
+            # [Fix5] 미평가 고래(score=0): 스코어링 데이터 없으므로 완전 차단
+            if score == 0:
+                print(f"[Bot] [SKIP] 미평가 고래 차단 (score=0): {addr[:8]}")
                 return
         else:
             # DB에 없는 완전 신규 고래 → 현재 거래 크기로 판단
@@ -192,8 +197,30 @@ class PredictCopyBot:
         except Exception:
             pass
 
-        if market.get("resolved") or market.get("status") in ("resolved", "closed"):
+        if self._is_resolved(market):
+            print(f"[Bot] [SKIP] 정산 완료 마켓: {market_id} (status={market.get('status')})")
             return
+
+        # ── Filter 6: 스프레드 과다 차단 (>15%) + 가격 이탈 방어 ──
+        ob = self.client.get_orderbook(market_id)
+        spread = self._get_orderbook_spread(ob)
+        if spread is not None and spread > 0.15:
+            print(f"[Bot] [SKIP] 스프레드 {spread:.1%} 과다: {market_id[:12]}...")
+            return
+        # 현재 오더북 ask vs 고래 거래가 25% 이상 이탈 → stale trade 차단
+        if ob:
+            asks = ob.get("asks", [])
+            if asks:
+                lv = asks[0]
+                raw_ask = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
+                if raw_ask > 0:
+                    if raw_ask > config.MAX_PRICE:
+                        print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
+                        return
+                    drift = abs(raw_ask - price) / max(price, 0.01)
+                    if drift > 0.25:
+                        print(f"[Bot] [SKIP] 가격 이탈 {drift:.0%} (고래:{price:.3f} 현재ask:{raw_ask:.3f}): {market_id[:12]}...")
+                        return
 
         # ── 베팅금 계산 ──
         portfolio = self._get_portfolio()
@@ -208,9 +235,9 @@ class PredictCopyBot:
         self._execute_trade(market_id, market, price, bet_size, addr, whale_name)
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
-        """고래 SELL 감지 → 동일 마켓 포지션 조기 청산"""
+        """고래 SELL 감지 → 동일 마켓 포지션 조기 청산 (어떤 고래든 해당 마켓 SELL이면 검토)"""
         for pos_key, pos in list(self.positions.items()):
-            if pos.get("marketId") != market_id or pos.get("whale_addr") != addr:
+            if pos.get("marketId") != market_id:
                 continue
             current = pos.get("current_price", pos["entry_price"])
             if current < pos["entry_price"]:
@@ -247,7 +274,8 @@ class PredictCopyBot:
 
         # 실제 체결가 사용 (paper 시 오더북+슬리피지+수수료 반영된 가격)
         exec_price = float(result.get("price") or price)
-        shares = bet_size / exec_price if exec_price > 0 else 0
+        net_size   = float(result.get("size") or bet_size)  # 수수료 차감 후 실투자액
+        shares = net_size / exec_price if exec_price > 0 else 0
         pos_key = f"{market_id}_{whale_addr[:8]}_{int(time.time())}"
 
         market_name = (
@@ -288,16 +316,30 @@ class PredictCopyBot:
 
     def _execute_sell(self, pos_key: str, pos: dict, sell_price: float, reason: str = "WIN"):
         """포지션 청산"""
-        pnl = (sell_price - pos["entry_price"]) * pos.get("shares", 0)
-        if reason in ("WIN",) and sell_price >= 0.99:
-            pnl = pos["size_usdc"] * (1 / pos["entry_price"] - 1)
+        shares = pos.get("shares", 0)
 
         result = self.client.place_order(
             market_id=pos["marketId"],
             side=1,  # SELL
             price=sell_price,
-            size_usdt=pos.get("shares", 0) * sell_price,
+            size_usdt=shares * sell_price,
         )
+
+        # PnL 계산
+        if reason == "WIN" and sell_price >= 0.99:
+            # 정산 승리: shares × $1 − 원금 (수수료 포함 정확한 수익)
+            pnl = shares * 1.0 - pos["size_usdc"]
+        elif reason == "LOSS" and sell_price <= 0.01:
+            # 정산 패배: 전액 손실
+            pnl = -pos["size_usdc"]
+        elif result and config.PAPER_TRADING:
+            # 페이퍼: 실제 오더북 bid − 슬리피지 가격 + 매도 수수료 반영
+            actual_sell = float(result.get("price") or sell_price)
+            sell_fee    = float(result.get("fee") or 0)
+            pnl         = (actual_sell - pos["entry_price"]) * shares - sell_fee
+            sell_price  = actual_sell  # 로그/텔레그램용
+        else:
+            pnl = (sell_price - pos["entry_price"]) * shares
 
         recovered = pos["size_usdc"] + pnl
         self.bankroll += recovered
@@ -333,27 +375,40 @@ class PredictCopyBot:
                 if not market:
                     continue
 
-                # TODO: 정산 감지 필드명 확인
-                resolved = market.get("resolved") or market.get("status") in ("resolved", "closed")
-                if resolved:
-                    # 승/패 판별
-                    # TODO: 결과 필드명 확인 (winningOutcome, result 등)
-                    result_val = market.get("winningOutcome") or market.get("result") or ""
-                    # 단순화: 현재가로 판단 (0.95 이상이면 WIN)
-                    current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
-                    reason = "WIN" if current >= 0.95 else "LOSS"
+                if self._is_resolved(market):
+                    # 승/패 판별: resolution 필드 우선 → 없으면 현재가 기준
+                    resolution = market.get("resolution") or {}
+                    won_name = (resolution.get("name") or "").upper()
+                    if won_name in ("YES", "UP", "ABOVE", "OVER"):
+                        reason = "WIN"
+                        current = 1.0
+                    elif won_name in ("NO", "DOWN", "BELOW", "UNDER"):
+                        reason = "LOSS"
+                        current = 0.0
+                    else:
+                        current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
+                        reason = "WIN" if current >= 0.95 else "LOSS"
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
                 # 손절 체크
                 current = self.client.get_best_price(pos["marketId"], side="SELL")
-                if current:
+                if current is not None:
                     pos["current_price"] = current
                     drop = (pos["entry_price"] - current) / pos["entry_price"]
                     if drop >= config.STOP_LOSS_PCT:
                         print(f"[Bot] 🔴 손절: {pos_key[:12]}... ({drop:.0%} 하락)")
                         self._execute_sell(pos_key, pos, current, reason="STOP_LOSS")
                         continue
+                else:
+                    # 오더북 조회 실패 → 마지막 알려진 가격으로 손절 재시도
+                    last = pos.get("current_price")
+                    if last is not None:
+                        drop = (pos["entry_price"] - last) / pos["entry_price"]
+                        if drop >= config.STOP_LOSS_PCT:
+                            print(f"[Bot] 🔴 손절(오더북 없음): {pos_key[:12]}... ({drop:.0%})")
+                            self._execute_sell(pos_key, pos, last, reason="STOP_LOSS")
+                            continue
 
                 # 타임아웃 (7일)
                 if now - pos.get("opened_at", now) > 7 * 86400:
@@ -366,6 +421,41 @@ class PredictCopyBot:
     # ──────────────────────────────────────────────
     # 유틸리티
     # ──────────────────────────────────────────────
+
+    def _is_resolved(self, market: dict) -> bool:
+        """마켓 정산 완료 여부 — API 응답 필드 정규화 (대소문자 불일치 방어)"""
+        if market.get("resolved"):
+            return True
+        if market.get("resolution") is not None:
+            return True
+        status = market.get("status", "").upper()
+        if status in ("RESOLVED", "CLOSED"):
+            return True
+        trading_status = market.get("tradingStatus", "").upper()
+        if trading_status in ("CLOSED", "RESOLVED"):
+            return True
+        return False
+
+    def _get_orderbook_spread(self, ob: dict | None) -> float | None:
+        """오더북 dict → best ask - best bid 스프레드 (None = 계산 불가)"""
+        if not ob:
+            return None
+        try:
+            def _price(lv):
+                if isinstance(lv, (list, tuple)):
+                    return float(lv[0])
+                return float(lv.get("price") or lv.get("p") or 0)
+            asks = ob.get("asks", [])
+            bids = ob.get("bids", [])
+            if not asks or not bids:
+                return None
+            best_ask = _price(asks[0])
+            best_bid = _price(bids[0])
+            if best_ask <= 0 or best_bid <= 0 or best_ask <= best_bid:
+                return None
+            return best_ask - best_bid
+        except Exception:
+            return None
 
     def _get_portfolio(self) -> float:
         invested = sum(p["size_usdc"] for p in self.positions.values())
@@ -420,7 +510,7 @@ class PredictCopyBot:
             self.positions     = state.get("positions", {})
             for tx in state.get("seen_txs", []):
                 self.seen_txs[tx] = 0
-            self._startup_time = None  # 복구 성공 → 백로그 필터 해제
+            # _startup_time 유지 — 백로그 차단 방어선 보존 (None 으로 해제하지 않음)
             print(f"[Bot] 상태 복구: 포지션 {len(self.positions)}개, PnL ${self.stats['total_pnl']:.2f}")
         except Exception as e:
             print(f"[Bot][WARN] 상태 복구 실패: {e}")
