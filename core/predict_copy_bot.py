@@ -357,6 +357,7 @@ class PredictCopyBot:
                 "question":     market_name,
                 "outcome_name": outcome_name,
                 "token_id":     token_id,
+                "end_date":     market.get("boostEndsAt"),
             }
 
         self.bankroll -= bet_size
@@ -796,7 +797,18 @@ class PredictCopyBot:
                 total_unrealized += unr
                 icon = "📈" if unr >= 0 else "📉"
                 label = self._resolve_question(pos)
-                rows.append(f"{icon} {label[:25]} | {unr:+.2f}")
+                # 만기일 파싱 (boostEndsAt 필드)
+                raw_end = pos.get("end_date")
+                if raw_end:
+                    try:
+                        from datetime import datetime, timezone
+                        ed = datetime.fromisoformat(raw_end.replace("Z", "+00:00"))
+                        exp_str = ed.strftime("%m/%d %H:%M")
+                    except Exception:
+                        exp_str = str(raw_end)[:11]
+                    rows.append(f"{icon} {label[:25]} | {unr:+.2f} | ⏰{exp_str}")
+                else:
+                    rows.append(f"{icon} {label[:25]} | {unr:+.2f}")
             msg = (f"📌 <b>포지션 ({len(self.positions)}개)</b>\n" +
                    "\n".join(rows) +
                    f"\n─────\n미실현 합계: ${total_unrealized:+.2f}")
