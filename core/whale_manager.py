@@ -76,7 +76,8 @@ query AccountPositions($address: Address!, $cursor: String) {
             name
             onChainId
           }
-          quantity
+          shares
+          averageBuyPriceUsd
         }
       }
       pageInfo {

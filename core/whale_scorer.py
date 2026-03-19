@@ -131,8 +131,9 @@ class WhaleScorer:
               edges {
                 node {
                   market { id question }
-                  outcome { name onChainId }
-                  quantity
+                  outcome { name }
+                  shares
+                  averageBuyPriceUsd
                   pnlUsd
                 }
               }
@@ -168,13 +169,18 @@ class WhaleScorer:
 
                 for e in edges:
                     n = e["node"]
-                    pnl_usd  = float(n.get("pnlUsd") or 0)
-                    question = (n.get("market") or {}).get("question") or ""
+                    pnl_usd     = float(n.get("pnlUsd") or 0)
+                    entry_price = float(n.get("averageBuyPriceUsd") or 0)
+                    shares      = float(n.get("shares") or 0) / 1e18  # BigIntString → float
+                    question    = (n.get("market") or {}).get("question") or ""
 
                     all_positions.append({
                         "market_id":    str((n.get("market") or {}).get("id", "")),
                         "question":     question,
                         "outcome_name": (n.get("outcome") or {}).get("name", ""),
+                        "entry_price":  entry_price,
+                        "shares":       shares,
+                        "size_usdt":    entry_price * shares,
                         "pnl":          pnl_usd,
                         "action":       "WIN" if pnl_usd > 0 else "LOSS",
                         "category":     classify_market(question),
