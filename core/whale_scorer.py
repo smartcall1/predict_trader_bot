@@ -125,16 +125,14 @@ class WhaleScorer:
           timestamp: int (정확한 ts 없음 → 현재 시각 근사)
         """
         query = """
-        query($addr: String!, $cursor: String) {
+        query($addr: Address!, $cursor: String) {
           account(address: $addr) {
             positions(filter: {isResolved: true}, pagination: {first: 100, after: $cursor}) {
               edges {
                 node {
                   market { id question }
-                  outcome { name }
-                  shares
-                  averageBuyPriceUsd
-                  valueUsd
+                  outcome { name onChainId }
+                  quantity
                   pnlUsd
                 }
               }
@@ -159,36 +157,33 @@ class WhaleScorer:
                 r.raise_for_status()
                 body = r.json()
                 if "errors" in body:
+                    print(f"[Scorer][WARN] GraphQL 오류 ({address[:8]}): {body['errors'][0].get('message','')}")
                     break
-                acc_data = body["data"]["account"]
+                acc_data = (body.get("data") or {}).get("account")
                 if not acc_data:
                     break
-                edges     = acc_data["positions"]["edges"]
-                page_info = acc_data["positions"]["pageInfo"]
+                pos_data  = acc_data.get("positions") or {}
+                edges     = pos_data.get("edges", [])
+                page_info = pos_data.get("pageInfo", {})
 
                 for e in edges:
                     n = e["node"]
-                    entry_price = float(n["averageBuyPriceUsd"] or 0)
-                    shares      = float(n["shares"] or 0) / 1e18
-                    pnl_usd     = float(n["pnlUsd"] or 0)
-                    question    = n["market"]["question"] or ""
+                    pnl_usd  = float(n.get("pnlUsd") or 0)
+                    question = (n.get("market") or {}).get("question") or ""
 
                     all_positions.append({
-                        "market_id":    str(n["market"]["id"]),
+                        "market_id":    str((n.get("market") or {}).get("id", "")),
                         "question":     question,
-                        "outcome_name": n["outcome"]["name"],
-                        "entry_price":  entry_price,
-                        "shares":       shares,
-                        "size_usdt":    entry_price * shares,
+                        "outcome_name": (n.get("outcome") or {}).get("name", ""),
                         "pnl":          pnl_usd,
                         "action":       "WIN" if pnl_usd > 0 else "LOSS",
                         "category":     classify_market(question),
                         "timestamp":    int(time.time()),
                     })
 
-                if not page_info["hasNextPage"]:
+                if not page_info.get("hasNextPage"):
                     break
-                cursor = page_info["endCursor"]
+                cursor = page_info.get("endCursor")
                 time.sleep(0.3)
 
             except Exception as e:
