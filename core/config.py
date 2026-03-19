@@ -40,7 +40,7 @@ class Config:
     MAX_POSITIONS       = int(os.getenv("MAX_POSITIONS", "30"))        # [Fix4] 20→30
     BET_DIVISOR         = int(os.getenv("BET_DIVISOR", "40"))         # [Fix4] 20→40 (포트폴리오 2.5% 베팅)
     STOP_LOSS_PCT       = float(os.getenv("STOP_LOSS_PCT", "0.40"))   # 40% 손절
-    MIN_WHALE_SIZE_USDT = float(os.getenv("MIN_WHALE_SIZE_USDT", "500.0"))  # 고래 최소 거래액
+    MIN_WHALE_SIZE_USDT = float(os.getenv("MIN_WHALE_SIZE_USDT", "200.0"))  # 고래 최소 거래액 (PAPER: 200, LIVE: 500 권장)
     MIN_PRICE           = float(os.getenv("MIN_PRICE", "0.10"))        # 극초저확률 차단
     MAX_PRICE           = float(os.getenv("MAX_PRICE", "0.85"))        # 정산 직전 차단 (0.85 초과 = 이미 한쪽 확정 가능성)
     DEFAULT_SLIPPAGE_BPS = int(os.getenv("DEFAULT_SLIPPAGE_BPS", "300"))  # 슬리피지 bps (300 = 3%)

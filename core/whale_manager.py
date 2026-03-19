@@ -6,8 +6,10 @@ Predict.fun 고래 탐지 모듈
   - 30초 간격, cursor 기반 페이지네이션으로 중복 방지
   - amountFilled >= MIN_WHALE_SIZE_USDT 거래 → 고래 후보 DB 등록
 
-WebSocket은 오더북만 지원 — 거래 이벤트 없음 (미사용)
-리더보드 API 없음 (공식 확인) — 폴링 자동 탐지 방식만 사용
+GraphQL 리더보드 발굴:
+  - 6시간마다 pnlUsd 기준 상위 트레이더 자동 시드
+  - 상위 20명 현재 포지션 조회 → 마켓별 중복 포지션 맵 생성
+  - overlap_positions.json → 봇 베팅금 배율 조정에 활용
 """
 
 import os
@@ -21,12 +23,70 @@ from urllib3.util.retry import Retry
 
 from config import config
 
-DB_FILE = os.path.join(config.DATA_DIR, "whales_predict.json")
-WEI     = 10 ** 18
+DB_FILE       = os.path.join(config.DATA_DIR, "whales_predict.json")
+SNAPSHOT_FILE = os.path.join(config.DATA_DIR, "leaderboard_snapshot.json")
+OVERLAP_FILE  = os.path.join(config.DATA_DIR, "overlap_positions.json")
+WEI           = 10 ** 18
+GRAPHQL_URL   = "https://graphql.predict.fun/graphql"
 
 # 스코어링 기준
 MIN_WIN_RATE = config.MIN_WIN_RATE
 MIN_TRADES   = config.MIN_TRADES
+
+# ──────────────────────────────────────────────
+# GraphQL 쿼리
+# ──────────────────────────────────────────────
+
+_LEADERBOARD_QUERY = """
+query Leaderboard($cursor: String) {
+  leaderboard(pagination: {first: 50, after: $cursor}) {
+    edges {
+      node {
+        rank
+        account {
+          address
+          name
+          statistics {
+            pnlUsd
+            volumeUsd
+            marketsCount
+          }
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"""
+
+_POSITIONS_QUERY = """
+query AccountPositions($address: Address!, $cursor: String) {
+  account(address: $address) {
+    positions(pagination: {first: 50, after: $cursor}, filter: {isResolved: false}) {
+      edges {
+        node {
+          market {
+            id
+            question
+          }
+          outcome {
+            name
+            onChainId
+          }
+          quantity
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"""
 
 
 # ──────────────────────────────────────────────
@@ -74,6 +134,157 @@ def save_whales_db(db: dict):
         print(f"[WhaleMgr][ERR] DB 저장 실패: {e}")
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+# ──────────────────────────────────────────────
+# GraphQL 리더보드 발굴
+# ──────────────────────────────────────────────
+
+def fetch_graphql_leaderboard(max_pages: int = 20, min_pnl: float = 1000.0) -> list:
+    """
+    GraphQL leaderboard에서 pnlUsd 기준 상위 트레이더 목록 반환
+    반환: [{"address", "name", "pnl", "vol", "markets"}, ...]  pnl 내림차순
+    """
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json", "User-Agent": "PredictBot/1.0"})
+
+    rows = []
+    cursor = None
+    page = 0
+
+    while page < max_pages:
+        variables = {"cursor": cursor} if cursor else {}
+        try:
+            resp = session.post(
+                GRAPHQL_URL,
+                json={"query": _LEADERBOARD_QUERY, "variables": variables},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception as e:
+            print(f"[WhaleMgr] GraphQL 리더보드 오류 (page {page}): {e}")
+            break
+
+        if "errors" in body:
+            print(f"[WhaleMgr] GraphQL 오류: {body['errors'][0]['message']}")
+            break
+
+        lb = body.get("data", {}).get("leaderboard", {})
+        edges = lb.get("edges", [])
+        page_info = lb.get("pageInfo", {})
+
+        for e in edges:
+            n = e["node"]
+            acc = n["account"]
+            st = acc.get("statistics") or {}
+            pnl = float(st.get("pnlUsd") or 0)
+            vol = float(st.get("volumeUsd") or 0)
+            if pnl < min_pnl:
+                continue
+            rows.append({
+                "address": acc["address"].lower(),
+                "name":    acc.get("name") or acc["address"][:10],
+                "pnl":     pnl,
+                "vol":     vol,
+                "markets": int(st.get("marketsCount") or 0),
+            })
+
+        page += 1
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        time.sleep(0.3)
+
+    rows.sort(key=lambda x: x["pnl"], reverse=True)
+    print(f"[WhaleMgr] GraphQL 리더보드: {len(rows)}명 수집 (pnl >= ${min_pnl:.0f})")
+    return rows
+
+
+def save_leaderboard_snapshot(rows: list):
+    """리더보드 스냅샷 저장 — whale_scorer delta 계산용 (6시간 주기)"""
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    data = {"timestamp": int(time.time()), "rows": rows}
+    tmp = SNAPSHOT_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, SNAPSHOT_FILE)
+    except Exception as e:
+        print(f"[WhaleMgr] 스냅샷 저장 실패: {e}")
+
+
+def load_leaderboard_snapshot() -> dict:
+    """이전 리더보드 스냅샷 로드"""
+    if not os.path.exists(SNAPSHOT_FILE):
+        return {}
+    try:
+        with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def get_overlap_positions(top_addrs: list, session: requests.Session, top_n: int = 20) -> dict:
+    """
+    상위 N명 고래의 현재 포지션을 GraphQL로 조회 → 동일 마켓 보유 맵 반환
+    반환: {market_id: [addr1, addr2, ...]}  (2명 이상 겹친 마켓만)
+    """
+    market_map: dict = {}  # market_id → [addrs]
+
+    for addr in top_addrs[:top_n]:
+        cursor = None
+        while True:
+            variables = {"address": addr}
+            if cursor:
+                variables["cursor"] = cursor
+            try:
+                resp = session.post(
+                    GRAPHQL_URL,
+                    json={"query": _POSITIONS_QUERY, "variables": variables},
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    break
+                body = resp.json()
+                acc_data = (body.get("data") or {}).get("account") or {}
+                pos_data = acc_data.get("positions") or {}
+                edges = pos_data.get("edges", [])
+                page_info = pos_data.get("pageInfo", {})
+
+                for e in edges:
+                    node = e.get("node", {})
+                    mkt = node.get("market") or {}
+                    market_id = str(mkt.get("id", ""))
+                    if market_id:
+                        market_map.setdefault(market_id, [])
+                        if addr not in market_map[market_id]:
+                            market_map[market_id].append(addr)
+
+                if not page_info.get("hasNextPage"):
+                    break
+                cursor = page_info.get("endCursor")
+            except Exception as e:
+                print(f"[WhaleMgr] overlap 포지션 조회 실패 ({addr[:8]}...): {e}")
+                break
+        time.sleep(0.2)
+
+    overlap = {mid: addrs for mid, addrs in market_map.items() if len(addrs) >= 2}
+    print(f"[WhaleMgr] Overlap 감지: {len(overlap)}개 마켓에서 다중 고래 포지션")
+    return overlap
+
+
+def save_overlap_map(overlap: dict):
+    """중복 포지션 맵 저장 — 봇 베팅금 배율 계산용"""
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    data = {"timestamp": int(time.time()), "overlap": overlap}
+    tmp = OVERLAP_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, OVERLAP_FILE)
+    except Exception as e:
+        print(f"[WhaleMgr] overlap 저장 실패: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -337,8 +548,68 @@ def get_whale_positions(address: str, session: requests.Session) -> list:
 # ──────────────────────────────────────────────
 
 def run_manager(client) -> WhaleWatcher:
-    """메인 봇에서 호출 — WhaleWatcher 시작"""
-    print("[WhaleMgr] 고래 탐지 초기화 (REST 폴링 방식)")
+    """메인 봇에서 호출 — WhaleWatcher 시작 + GraphQL 리더보드 주기 갱신"""
+    print("[WhaleMgr] 고래 탐지 초기화 (REST 폴링 + GraphQL 리더보드)")
+
+    def _leaderboard_refresh_loop():
+        gql_session = requests.Session()
+        gql_session.headers.update({"Content-Type": "application/json", "User-Agent": "PredictBot/1.0"})
+        first_run = True
+        while True:
+            try:
+                # 첫 실행은 즉시, 이후 6시간마다
+                if not first_run:
+                    time.sleep(6 * 3600)
+                first_run = False
+
+                rows = fetch_graphql_leaderboard(max_pages=20, min_pnl=2000.0)
+                if not rows:
+                    continue
+
+                # 고래 DB 자동 시드 (상위 50명)
+                db = load_whales_db()
+                added = 0
+                for r in rows[:50]:
+                    addr = r["address"]
+                    if addr not in db:
+                        db[addr] = {
+                            "address":      addr,
+                            "name":         r["name"],
+                            "total_trades": r["markets"],
+                            "wins":         0,
+                            "losses":       0,
+                            "total_pnl":    round(r["pnl"], 2),
+                            "total_volume": round(r["vol"], 2),
+                            "score":        0.0,
+                            "status":       "seeded",
+                            "leaderboard_pnl": round(r["pnl"], 2),
+                            "last_seen":    int(time.time()),
+                            "trades":       [],
+                        }
+                        added += 1
+                    else:
+                        db[addr]["leaderboard_pnl"] = round(r["pnl"], 2)
+                        db[addr]["total_volume"] = max(
+                            db[addr].get("total_volume", 0), round(r["vol"], 2)
+                        )
+                if added:
+                    save_whales_db(db)
+                    print(f"[WhaleMgr] 리더보드 시드: {added}명 신규 추가")
+
+                # 스냅샷 저장 (scorer delta 계산용)
+                save_leaderboard_snapshot(rows)
+
+                # 상위 20명 현재 포지션 → overlap 맵 갱신
+                top_addrs = [r["address"] for r in rows[:20]]
+                overlap = get_overlap_positions(top_addrs, gql_session)
+                if overlap:
+                    save_overlap_map(overlap)
+
+            except Exception as e:
+                print(f"[WhaleMgr] 리더보드 갱신 오류: {e}")
+
+    threading.Thread(target=_leaderboard_refresh_loop, daemon=True).start()
+
     watcher = WhaleWatcher()
     watcher.start()
     return watcher

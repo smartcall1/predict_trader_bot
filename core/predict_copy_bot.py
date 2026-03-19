@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from config import config
 from client_wrapper import PredictFunClient
-from whale_manager import run_manager, load_whales_db
+from whale_manager import run_manager, load_whales_db, OVERLAP_FILE
 from whale_scorer import WhaleScorer
 from telegram_notifier import notifier as tg_notifier
 
@@ -163,16 +163,15 @@ class PredictCopyBot:
             score = whale_info.get("score", 0)
             if score > 0 and score < 0.2:
                 return
-            # [Fix5] 미평가 고래(score=0): 고거래량 고래만 임시 허용 (스코어링 데이터 부족 기간)
-            # 기준: 누적 거래량 $50K 이상 OR 거래 10건 이상 (둘 다 충족 필요)
+            # 미평가 고래(score=0): PAPER 기간 vol >= $1K 허용 (LIVE 전환 시 $5K로 상향)
             if score == 0:
                 vol = whale_info.get("total_volume", 0)
-                if vol < 5000:
+                if vol < 1000:
                     print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
-            # DB에 없는 완전 신규 고래 → 현재 거래 크기로 판단
-            if size_usdt < config.MIN_WHALE_SIZE_USDT * 2:
+            # DB에 없는 완전 신규 고래 → 현재 거래 크기로만 판단
+            if size_usdt < config.MIN_WHALE_SIZE_USDT:
                 return
 
         # ── Filter 5: 동일 마켓 중복 진입 차단 ──
@@ -181,14 +180,14 @@ class PredictCopyBot:
             print(f"[Bot] [SKIP] 동일 마켓 중복 차단: {market_id[:12]}...")
             return
 
-        # [Fix1-B] addr 제외한 마켓+방향 키로 30분 TTL 중복 방어
+        # [Fix1-B] addr 제외한 마켓+방향 키로 15분 TTL 중복 방어 (PAPER: 900s, LIVE: 1800s 권장)
         sig_key = f"{market_id}:{side_upper}"
         now = int(time.time())
-        if now - self._seen_market_signals.get(sig_key, 0) < 1800:
+        if now - self._seen_market_signals.get(sig_key, 0) < 900:
             return
         self._seen_market_signals[sig_key] = now
         if len(self._seen_market_signals) > 500:
-            cutoff = now - 3600
+            cutoff = now - 1800
             self._seen_market_signals = {
                 k: v for k, v in self._seen_market_signals.items() if v > cutoff
             }
@@ -246,33 +245,24 @@ class PredictCopyBot:
 
         whale_name = (whale_info or {}).get("name", addr[:8])
 
-        # ── 역방향 전략: 고래 반대편 outcome 매수 ──
-        contra = self._get_opposite_outcome(market.get("outcomes", []), outcome_name, token_id)
-        if not contra:
-            print(f"[Bot] [SKIP] 역방향 outcome 탐색 실패 (멀티아웃컴?): {market_id[:12]}...")
-            return
+        # ── Overlap 배율: 0.4 반감 수렴 공식 (최대 ≈×1.667) ──
+        # multiplier = 1 + 0.4 + 0.4² + ... → 겹침 1명 추가마다 효과 40% 감쇠
+        overlap_count = self._get_overlap_count(market_id)
+        if overlap_count >= 2:
+            bonus = sum(0.4 ** i for i in range(1, overlap_count))
+            multiplier = 1.0 + bonus
+            bet_size = min(bet_size * multiplier, self.bankroll * 0.9)
+            print(f"[Bot] [OVERLAP {overlap_count}명] 배율 {multiplier:.3f}x 적용: ${bet_size:.2f}")
 
-        contra_outcome_name = contra.get("name", "")
-        contra_token_id     = contra.get("onChainId", "") or contra.get("token_id", "")
-        contra_price        = round(1.0 - price, 4)
-
-        # 역방향 가격도 범위 필터 통과 확인
-        if contra_price < config.MIN_PRICE or contra_price > config.MAX_PRICE:
-            print(f"[Bot] [SKIP] 역방향 가격 범위 이탈: {contra_price:.3f}")
-            return
-
-        print(f"[Bot] 🔄 역방향 진입: {whale_name} BUY {outcome_name}@{price:.3f} → {contra_outcome_name}@{contra_price:.3f} | ${bet_size:.2f}")
-        self._execute_trade(market_id, market, contra_price, bet_size, addr, whale_name,
-                            contra_outcome_name, contra_token_id, is_contrarian=True)
+        # ── 동방향 진입: 고래와 동일 outcome 매수 ──
+        print(f"[Bot] [COPY] {whale_name} BUY {outcome_name}@{price:.3f} | ${bet_size:.2f} | overlap={overlap_count}")
+        self._execute_trade(market_id, market, price, bet_size, addr, whale_name,
+                            outcome_name, token_id)
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
-        """고래 SELL 감지 → 동일 마켓 포지션 조기 청산 (어떤 고래든 해당 마켓 SELL이면 검토)"""
+        """고래 SELL 감지 → 동일 마켓 동방향 포지션 조기 청산 (이익/본전일 때만)"""
         for pos_key, pos in list(self.positions.items()):
             if pos.get("marketId") != market_id:
-                continue
-            # 역방향 포지션: 고래 SELL = 고래 포지션 가격 하락 = 우리 반대편 가격 상승 → 유리, 홀드
-            if pos.get("is_contrarian"):
-                print(f"[Bot] [CONTRARIAN HOLD] 고래 SELL → 역방향 포지션 유리, 홀드: {pos_key[:12]}...")
                 continue
             current = pos.get("current_price", pos["entry_price"])
             if current < pos["entry_price"]:
@@ -281,35 +271,33 @@ class PredictCopyBot:
             print(f"[Bot] [MIRROR EXIT] 고래 SELL 감지 → 청산: {pos_key[:12]}...")
             self._execute_sell(pos_key, pos, current, reason="MIRROR_EXIT")
 
-    def _get_opposite_outcome(self, outcomes: list, outcome_name: str, token_id: str) -> dict | None:
-        """고래가 매수한 outcome의 반대편 반환 (바이너리 마켓 전용)"""
-        if not outcomes or len(outcomes) < 2:
-            return None
+    # ──────────────────────────────────────────────
+    # Overlap 배율 계산
+    # ──────────────────────────────────────────────
 
-        # 현재 outcome 식별
-        current = None
-        for o in outcomes:
-            oc_id = o.get("onChainId", "") or o.get("token_id", "")
-            if token_id and oc_id == token_id:
-                current = o
-                break
-            if outcome_name and o.get("name", "").upper() == outcome_name.upper():
-                current = o
-                break
+    def _load_overlap_map(self) -> dict:
+        """overlap_positions.json 로드 (1시간 TTL)"""
+        now = int(time.time())
+        cached = getattr(self, "_overlap_cache", None)
+        if cached and now - cached.get("loaded_at", 0) < 3600:
+            return cached.get("data", {})
+        try:
+            if os.path.exists(OVERLAP_FILE):
+                with open(OVERLAP_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                # 파일 자체가 6시간 이상 오래되면 무시
+                if now - raw.get("timestamp", 0) < 6 * 3600:
+                    self._overlap_cache = {"loaded_at": now, "data": raw.get("overlap", {})}
+                    return self._overlap_cache["data"]
+        except Exception:
+            pass
+        self._overlap_cache = {"loaded_at": now, "data": {}}
+        return {}
 
-        if not current:
-            # fallback: YES/UP 계열이면 NO 계열로
-            if outcome_name.upper() in ("YES", "UP", "ABOVE", "OVER"):
-                return next(
-                    (o for o in outcomes if o.get("name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")),
-                    None,
-                )
-            return None
-
-        # 바이너리(2개)만 역방향 허용 — 멀티아웃컴은 "반대" 정의 불명확
-        cur_id = current.get("onChainId", "") or current.get("token_id", "")
-        others = [o for o in outcomes if (o.get("onChainId") or o.get("token_id")) != cur_id]
-        return others[0] if len(others) == 1 else None
+    def _get_overlap_count(self, market_id: str) -> int:
+        """해당 마켓에 포지션 보유 중인 상위 고래 수 반환"""
+        overlap = self._load_overlap_map()
+        return len(overlap.get(str(market_id), []))
 
     # ──────────────────────────────────────────────
     # 주문 실행
@@ -317,7 +305,7 @@ class PredictCopyBot:
 
     def _execute_trade(self, market_id: str, market: dict, price: float,
                         bet_size: float, whale_addr: str, whale_name: str,
-                        outcome_name: str = "", token_id: str = "", is_contrarian: bool = False):
+                        outcome_name: str = "", token_id: str = ""):
         """BUY 주문 실행"""
         result = self.client.place_order(
             market_id=market_id,
@@ -354,18 +342,17 @@ class PredictCopyBot:
 
         with self._position_lock:
             self.positions[pos_key] = {
-                "marketId": market_id,
-                "whale_addr": whale_addr,
-                "whale_name": whale_name,
-                "entry_price": exec_price,
+                "marketId":     market_id,
+                "whale_addr":   whale_addr,
+                "whale_name":   whale_name,
+                "entry_price":  exec_price,
                 "current_price": exec_price,
-                "size_usdc": bet_size,
-                "shares": shares,
-                "opened_at": int(time.time()),
-                "question": market_name,
+                "size_usdc":    bet_size,
+                "shares":       shares,
+                "opened_at":    int(time.time()),
+                "question":     market_name,
                 "outcome_name": outcome_name,
-                "token_id": token_id,
-                "is_contrarian": is_contrarian,
+                "token_id":     token_id,
             }
 
         self.bankroll -= bet_size
@@ -478,24 +465,23 @@ class PredictCopyBot:
                     continue
 
                 if self._is_resolved(market):
-                    # 승/패 판별: resolution 필드 우선 → 없으면 현재가 기준
+                    # 승/패 판별: resolution 필드 우선 → 포지션 outcome과 비교
                     resolution = market.get("resolution") or {}
                     won_name = (resolution.get("name") or "").upper()
-                    if won_name in ("YES", "UP", "ABOVE", "OVER"):
-                        reason = "WIN"
-                        current = 1.0
-                    elif won_name in ("NO", "DOWN", "BELOW", "UNDER"):
-                        reason = "LOSS"
-                        current = 0.0
+                    our_outcome = pos.get("outcome_name", "").upper()
+                    if won_name:
+                        # 우리가 보유한 outcome과 승리 outcome 비교
+                        reason = "WIN" if won_name == our_outcome else "LOSS"
+                        current = 1.0 if reason == "WIN" else 0.0
                     else:
+                        # resolution name 없으면 현재가 기준
                         current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
                         reason = "WIN" if current >= 0.95 else "LOSS"
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
-                # 손절 체크 (No 결과물 또는 역방향 포지션: 현재가 = 1 - YES ask)
-                _pos_is_no = pos.get("is_contrarian", False) or \
-                             pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
+                # 손절 체크 (No 결과물: 현재가 = 1 - YES ask)
+                _pos_is_no = pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
                 if _pos_is_no:
                     yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
                     current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
