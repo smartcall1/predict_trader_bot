@@ -64,7 +64,7 @@ class PredictCopyBot:
             db = load_whales_db()
             self._active_whale_count = sum(
                 1 for w in db.values()
-                if w.get("score", 0) >= 0.2 or w.get("total_volume", 0) >= 1000
+                if w.get("score", 0) >= 0.2 or w.get("leaderboard_pnl", 0) > 0
             )
         except Exception:
             pass
