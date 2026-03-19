@@ -81,7 +81,7 @@ class PredictCopyBot:
         tg_notifier.send_message(
             f"🚀 <b>Predict.fun 봇 시작 [{mode}]</b>\n"
             f"💵 뱅크롤: ${self.bankroll:.2f}\n"
-            f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC",
+            f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
             reply_markup=self._tg_keyboard(),
         )
 
@@ -714,8 +714,8 @@ class PredictCopyBot:
                     if first_line:
                         first_ts = json.loads(first_line).get("timestamp")
                         if first_ts:
-                            first_dt = datetime.fromisoformat(str(first_ts).split(".")[0])
-                            days_running = (datetime.utcnow() - first_dt).total_seconds() / 86400
+                            first_dt = datetime.fromisoformat(str(first_ts).split(".")[0]).replace(tzinfo=timezone.utc)
+                            days_running = (datetime.now(timezone.utc) - first_dt).total_seconds() / 86400
                 if days_running >= 1.0:
                     apr = roi / days_running * 365
                     roi_line = f"💹 ROI: {roi:+.2f}% | APR: {apr:+.1f}%\n"
@@ -737,7 +737,7 @@ class PredictCopyBot:
                 f"{sep}\n"
                 f"📌 활성 포지션: {len(self.positions)}개\n"
                 f"🐳 추적 고래: {self._active_whale_count}마리\n"
-                f"🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} (UTC)"
+                f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} (UTC)"
             )
             tg_notifier.send_message(msg, reply_markup=self._tg_keyboard())
         except Exception as e:
