@@ -61,7 +61,11 @@ class PredictCopyBot:
 
         # 시작 시 고래 DB 카운트 초기화 (6시간 대기 없이 즉시 표시)
         try:
-            self._active_whale_count = len(load_whales_db())
+            db = load_whales_db()
+            self._active_whale_count = sum(
+                1 for w in db.values()
+                if w.get("score", 0) >= 0.2 or w.get("total_volume", 0) >= 1000
+            )
         except Exception:
             pass
 
@@ -623,7 +627,10 @@ class PredictCopyBot:
                 if now - last_score_update > 6 * 3600:
                     self.scorer.update_all()
                     db = load_whales_db()
-                    self._active_whale_count = len(db)
+                    self._active_whale_count = sum(
+                        1 for w in db.values()
+                        if w.get("score", 0) >= 0.2 or w.get("total_volume", 0) >= 1000
+                    )
                     last_score_update = now
                 self._save_state()
             except Exception as e:
