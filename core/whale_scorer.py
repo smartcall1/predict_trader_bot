@@ -201,7 +201,7 @@ class WhaleScorer:
     def fetch_account_stats(self, address: str) -> dict | None:
         """GraphQL account.statistics 조회 (전체 PnL/볼륨)"""
         query = """
-        query($addr: String!) {
+        query($addr: Address!) {
           account(address: $addr) {
             statistics { pnlUsd volumeUsd marketsCount }
           }
