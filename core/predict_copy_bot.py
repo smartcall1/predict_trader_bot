@@ -245,13 +245,34 @@ class PredictCopyBot:
             return
 
         whale_name = (whale_info or {}).get("name", addr[:8])
-        print(f"[Bot] 🐳 복사 진입: {whale_name} | {outcome_name} | {market_id[:12]}... | ${bet_size:.2f} @ {price:.3f}")
-        self._execute_trade(market_id, market, price, bet_size, addr, whale_name, outcome_name, token_id)
+
+        # ── 역방향 전략: 고래 반대편 outcome 매수 ──
+        contra = self._get_opposite_outcome(market.get("outcomes", []), outcome_name, token_id)
+        if not contra:
+            print(f"[Bot] [SKIP] 역방향 outcome 탐색 실패 (멀티아웃컴?): {market_id[:12]}...")
+            return
+
+        contra_outcome_name = contra.get("name", "")
+        contra_token_id     = contra.get("onChainId", "") or contra.get("token_id", "")
+        contra_price        = round(1.0 - price, 4)
+
+        # 역방향 가격도 범위 필터 통과 확인
+        if contra_price < config.MIN_PRICE or contra_price > config.MAX_PRICE:
+            print(f"[Bot] [SKIP] 역방향 가격 범위 이탈: {contra_price:.3f}")
+            return
+
+        print(f"[Bot] 🔄 역방향 진입: {whale_name} BUY {outcome_name}@{price:.3f} → {contra_outcome_name}@{contra_price:.3f} | ${bet_size:.2f}")
+        self._execute_trade(market_id, market, contra_price, bet_size, addr, whale_name,
+                            contra_outcome_name, contra_token_id, is_contrarian=True)
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
         """고래 SELL 감지 → 동일 마켓 포지션 조기 청산 (어떤 고래든 해당 마켓 SELL이면 검토)"""
         for pos_key, pos in list(self.positions.items()):
             if pos.get("marketId") != market_id:
+                continue
+            # 역방향 포지션: 고래 SELL = 고래 포지션 가격 하락 = 우리 반대편 가격 상승 → 유리, 홀드
+            if pos.get("is_contrarian"):
+                print(f"[Bot] [CONTRARIAN HOLD] 고래 SELL → 역방향 포지션 유리, 홀드: {pos_key[:12]}...")
                 continue
             current = pos.get("current_price", pos["entry_price"])
             if current < pos["entry_price"]:
@@ -260,13 +281,43 @@ class PredictCopyBot:
             print(f"[Bot] [MIRROR EXIT] 고래 SELL 감지 → 청산: {pos_key[:12]}...")
             self._execute_sell(pos_key, pos, current, reason="MIRROR_EXIT")
 
+    def _get_opposite_outcome(self, outcomes: list, outcome_name: str, token_id: str) -> dict | None:
+        """고래가 매수한 outcome의 반대편 반환 (바이너리 마켓 전용)"""
+        if not outcomes or len(outcomes) < 2:
+            return None
+
+        # 현재 outcome 식별
+        current = None
+        for o in outcomes:
+            oc_id = o.get("onChainId", "") or o.get("token_id", "")
+            if token_id and oc_id == token_id:
+                current = o
+                break
+            if outcome_name and o.get("name", "").upper() == outcome_name.upper():
+                current = o
+                break
+
+        if not current:
+            # fallback: YES/UP 계열이면 NO 계열로
+            if outcome_name.upper() in ("YES", "UP", "ABOVE", "OVER"):
+                return next(
+                    (o for o in outcomes if o.get("name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")),
+                    None,
+                )
+            return None
+
+        # 바이너리(2개)만 역방향 허용 — 멀티아웃컴은 "반대" 정의 불명확
+        cur_id = current.get("onChainId", "") or current.get("token_id", "")
+        others = [o for o in outcomes if (o.get("onChainId") or o.get("token_id")) != cur_id]
+        return others[0] if len(others) == 1 else None
+
     # ──────────────────────────────────────────────
     # 주문 실행
     # ──────────────────────────────────────────────
 
     def _execute_trade(self, market_id: str, market: dict, price: float,
                         bet_size: float, whale_addr: str, whale_name: str,
-                        outcome_name: str = "", token_id: str = ""):
+                        outcome_name: str = "", token_id: str = "", is_contrarian: bool = False):
         """BUY 주문 실행"""
         result = self.client.place_order(
             market_id=market_id,
@@ -314,6 +365,7 @@ class PredictCopyBot:
                 "question": market_name,
                 "outcome_name": outcome_name,
                 "token_id": token_id,
+                "is_contrarian": is_contrarian,
             }
 
         self.bankroll -= bet_size
@@ -441,8 +493,9 @@ class PredictCopyBot:
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
-                # 손절 체크 (No 결과물: 현재가 = 1 - YES ask)
-                _pos_is_no = pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
+                # 손절 체크 (No 결과물 또는 역방향 포지션: 현재가 = 1 - YES ask)
+                _pos_is_no = pos.get("is_contrarian", False) or \
+                             pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
                 if _pos_is_no:
                     yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
                     current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
