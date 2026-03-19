@@ -167,15 +167,17 @@ class PredictCopyBot:
             score = whale_info.get("score", 0)
             if score > 0 and score < 0.2:
                 return
-            # 미평가 고래(score=0): PAPER 기간 vol >= $1K 허용 (LIVE 전환 시 $5K로 상향)
+            # 미평가 고래(score=0): 리더보드 검증(pnl>0)이거나 vol >= $2K 이상만 허용
             if score == 0:
+                lb_pnl = whale_info.get("leaderboard_pnl", 0)
                 vol = whale_info.get("total_volume", 0)
-                if vol < 1000:
-                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}): {addr[:8]}")
+                if lb_pnl <= 0 and vol < 2000:
+                    print(f"[Bot] [SKIP] 미평가 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
-            # DB에 없는 완전 신규 고래 → 현재 거래 크기로만 판단
-            if size_usdt < config.MIN_WHALE_SIZE_USDT:
+            # DB에 없는 완전 신규 고래 → $1000 이상 거래만 허용
+            if size_usdt < 1000:
+                print(f"[Bot] [SKIP] 신규 고래 최소 크기 미달 (${size_usdt:.0f}): {addr[:8]}")
                 return
 
         # ── Filter 5: 동일 마켓 중복 진입 차단 ──
@@ -214,6 +216,32 @@ class PredictCopyBot:
         if self._is_resolved(market):
             print(f"[Bot] [SKIP] 정산 완료 마켓: {market_id} (status={market.get('status')})")
             return
+
+        # ── Filter 5-F: FDV/토큰가치 마켓 차단 ──
+        _question_text = (
+            market.get("question") or market.get("title") or
+            market.get("name") or market.get("description") or ""
+        ).lower()
+        _FDV_KEYWORDS = ["fdv", "market cap", "fully diluted", "mcap", "token launch",
+                         "listing price", "token price"]
+        if any(kw in _question_text for kw in _FDV_KEYWORDS):
+            print(f"[Bot] [SKIP] FDV/토큰가치 마켓 차단: {_question_text[:50]}")
+            return
+
+        # ── Filter 5-G: 만기 불명 / 60일 초과 장기 마켓 차단 ──
+        # boostEndsAt=null → 비부스트 마켓 = 장기/투기성 마켓 패턴 (market_debug.jsonl 검증 완료)
+        _boost_ends = market.get("boostEndsAt")
+        if not _boost_ends:
+            print(f"[Bot] [SKIP] 비부스트 마켓 차단 (boostEndsAt=null): {_question_text[:50]}")
+            return
+        try:
+            _end_dt = datetime.fromisoformat(str(_boost_ends).replace("Z", "+00:00"))
+            _days_left = (_end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+            if _days_left > 60:
+                print(f"[Bot] [SKIP] 장기 마켓 차단 ({_days_left:.0f}일 남음): {_question_text[:40]}")
+                return
+        except Exception:
+            pass  # 파싱 실패 시 통과 (방어적)
 
         # ── Filter 6: 스프레드 과다 차단 (>15%) + 가격 이탈 방어 ──
         ob = self.client.get_orderbook(market_id)
