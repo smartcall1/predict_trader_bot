@@ -659,13 +659,15 @@ class PredictCopyBot:
 
     def _handle_tg_command(self, text: str):
         cmd = text.replace("📊 ", "").replace("📋 ", "").replace("📌 ", "") \
-                  .replace("🔄 ", "").replace("⏹ ", "").strip().lower()
+                  .replace("🐳 ", "").replace("🔄 ", "").replace("⏹ ", "").strip().lower()
         if cmd in ("status", "봇 상태"):
             self._send_telegram_status()
         elif cmd in ("trades", "거래 내역"):
             self._send_telegram_trades()
         elif cmd in ("positions", "포지션"):
             self._send_telegram_positions()
+        elif cmd in ("whales", "고래"):
+            self._send_telegram_whales()
         elif cmd in ("restart", "재시작"):
             if self._pending_confirm and self._pending_confirm.get("action") == "restart":
                 tg_notifier.send_message("🔄 재시작 중...")
@@ -684,7 +686,7 @@ class PredictCopyBot:
         return json.dumps({
             "keyboard": [
                 [{"text": "📊 Status"}, {"text": "📋 Trades"}, {"text": "📌 Positions"}],
-                [{"text": "🔄 Restart"}, {"text": "⏹ Stop"}],
+                [{"text": "🐳 Whales"}, {"text": "🔄 Restart"}, {"text": "⏹ Stop"}],
             ],
             "resize_keyboard": True,
             "is_persistent": True,
@@ -801,6 +803,30 @@ class PredictCopyBot:
             tg_notifier.send_message(msg)
         except Exception as e:
             print(f"[Bot][WARN] 포지션 전송 실패: {e}")
+
+    def _send_telegram_whales(self):
+        try:
+            db = load_whales_db()
+            active = [
+                w for w in db.values()
+                if w.get("score", 0) >= 0.2 or w.get("leaderboard_pnl", 0) > 0
+            ]
+            active.sort(key=lambda w: w.get("score", 0), reverse=True)
+            if not active:
+                tg_notifier.send_message("🐳 <b>추적 고래 없음</b>")
+                return
+            rows = []
+            for i, w in enumerate(active[:30], 1):
+                name = w.get("name") or w.get("address", "?")[:10]
+                score = w.get("score", 0.0)
+                rows.append(f"{i:2d}. {name:<18} {score*100:.1f}점")
+            msg = (
+                f"🐳 <b>추적 고래 ({len(active)}마리)</b>\n"
+                "<pre>" + "\n".join(rows) + "</pre>"
+            )
+            tg_notifier.send_message(msg)
+        except Exception as e:
+            print(f"[Bot][WARN] 고래 목록 전송 실패: {e}")
 
 
 if __name__ == "__main__":
