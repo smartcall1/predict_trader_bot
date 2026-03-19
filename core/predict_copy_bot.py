@@ -811,7 +811,8 @@ class PredictCopyBot:
                 w for w in db.values()
                 if w.get("score", 0) >= 0.2 or w.get("leaderboard_pnl", 0) > 0
             ]
-            active.sort(key=lambda w: w.get("score", 0), reverse=True)
+            # score 우선, 동점이면 leaderboard_pnl 기준 내림차순
+            active.sort(key=lambda w: (w.get("score", 0), w.get("leaderboard_pnl", 0)), reverse=True)
             if not active:
                 tg_notifier.send_message("🐳 <b>추적 고래 없음</b>")
                 return
@@ -819,10 +820,16 @@ class PredictCopyBot:
             for i, w in enumerate(active[:30], 1):
                 name = w.get("name") or w.get("address", "?")[:10]
                 score = w.get("score", 0.0)
-                rows.append(f"{i:2d}. {name:<18} {score*100:.1f}점")
+                pnl = w.get("leaderboard_pnl", 0.0)
+                if score >= 0.2:
+                    stat = f"{score*100:.1f}점"
+                else:
+                    stat = f"PnL ${pnl:+.0f}"
+                rows.append(f"{i}. {name} — {stat}")
             msg = (
                 f"🐳 <b>추적 고래 ({len(active)}마리)</b>\n"
-                "<pre>" + "\n".join(rows) + "</pre>"
+                "─────────────────\n" +
+                "\n".join(rows)
             )
             tg_notifier.send_message(msg)
         except Exception as e:
