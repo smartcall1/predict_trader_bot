@@ -14,6 +14,7 @@ GraphQL 리더보드 발굴:
 
 import os
 import json
+import math
 import time
 import threading
 import requests
@@ -58,6 +59,16 @@ query Leaderboard($cursor: String) {
       hasNextPage
       endCursor
     }
+  }
+}
+"""
+
+_MARKET_STATUS_QUERY = """
+query($id: ID!) {
+  market(id: $id) {
+    id
+    status
+    resolution { name }
   }
 }
 """
@@ -215,6 +226,26 @@ def save_leaderboard_snapshot(rows: list):
         print(f"[WhaleMgr] 스냅샷 저장 실패: {e}")
 
 
+_CATEGORY_KEYWORDS = {
+    "sports":   ["nba", "nfl", "nhl", "mlb", "soccer", "football", "basketball",
+                 "tennis", "cricket", "rugby", "golf", "f1", "racing", "ufc", "mma",
+                 "champion", "league", "cup", "series", "match", "lakers", "celtics"],
+    "crypto":   ["btc", "eth", "bitcoin", "ethereum", "crypto", "token", "defi",
+                 "price", "fdv", "launch", "airdrop", "sol", "bnb", "usdt",
+                 "exchange", "coinbase", "ipo"],
+    "politics": ["election", "president", "senate", "congress", "vote", "political",
+                 "democrat", "republican", "biden", "trump", "governor", "primary"],
+}
+
+
+def _classify_market(question: str) -> str:
+    q = question.lower()
+    for cat, keywords in _CATEGORY_KEYWORDS.items():
+        if any(k in q for k in keywords):
+            return cat
+    return "other"
+
+
 def load_leaderboard_snapshot() -> dict:
     """이전 리더보드 스냅샷 로드"""
     if not os.path.exists(SNAPSHOT_FILE):
@@ -224,6 +255,86 @@ def load_leaderboard_snapshot() -> dict:
             return json.load(f)
     except Exception:
         return {}
+
+
+def settle_pending_trades():
+    """
+    action=None인 BUY 거래들의 마켓 정산 결과를 GraphQL로 확인하여
+    action(WIN/LOSS), pnl, category 갱신 + wins/losses/total_pnl 누적.
+    leaderboard refresh와 동일한 6시간 주기로 호출.
+    """
+    db = load_whales_db()
+
+    # market_id → [(addr, trade_idx), ...] 맵핑
+    pending_map: dict = {}
+    for addr, whale in db.items():
+        for i, t in enumerate(whale.get("trades", [])):
+            if t.get("side") == "BUY" and t.get("action") not in ("WIN", "LOSS"):
+                mid = str(t.get("marketId") or t.get("market_id") or "")
+                if mid:
+                    pending_map.setdefault(mid, []).append((addr, i))
+
+    if not pending_map:
+        return
+
+    total_pending = sum(len(v) for v in pending_map.values())
+    print(f"[WhaleMgr] 정산 확인: {len(pending_map)}개 마켓 / {total_pending}건 대기")
+
+    session = requests.Session()
+    session.headers.update({"Content-Type": "application/json", "User-Agent": "PredictBot/1.0"})
+
+    settled = 0
+    for market_id, entries in pending_map.items():
+        try:
+            r = session.post(
+                GRAPHQL_URL,
+                json={"query": _MARKET_STATUS_QUERY, "variables": {"id": market_id}},
+                timeout=10,
+            )
+            market = (r.json().get("data") or {}).get("market") or {}
+            if market.get("status") != "RESOLVED":
+                continue
+            resolution = market.get("resolution") or {}
+            winning_outcome = (resolution.get("name") or "").strip().lower()
+            if not winning_outcome:
+                continue
+
+            for addr, trade_idx in entries:
+                try:
+                    t = db[addr]["trades"][trade_idx]
+                    outcome_name = (t.get("outcome_name") or "").strip().lower()
+                    entry_price  = float(t.get("price") or t.get("entry_price") or 0)
+                    size_usdt    = float(t.get("size_usdt") or 0)
+                    if entry_price <= 0 or size_usdt <= 0:
+                        continue
+
+                    is_win = outcome_name == winning_outcome
+                    pnl = round(
+                        size_usdt * (1.0 / entry_price - 1.0) if is_win else -size_usdt, 4
+                    )
+
+                    t["action"]      = "WIN" if is_win else "LOSS"
+                    t["pnl"]         = pnl
+                    t["entry_price"] = entry_price
+                    t["category"]    = _classify_market(t.get("question", ""))
+
+                    w = db[addr]
+                    if is_win:
+                        w["wins"] = w.get("wins", 0) + 1
+                    else:
+                        w["losses"] = w.get("losses", 0) + 1
+                    w["total_pnl"] = round(w.get("total_pnl", 0) + pnl, 4)
+                    settled += 1
+                except Exception as e:
+                    print(f"[WhaleMgr][WARN] 정산 처리 실패 ({addr[:8]}, market={market_id}): {e}")
+
+        except Exception as e:
+            print(f"[WhaleMgr][WARN] 마켓 정산 조회 실패 (market={market_id}): {e}")
+        time.sleep(0.2)
+
+    if settled:
+        save_whales_db(db)
+    print(f"[WhaleMgr] 정산 완료: {settled}/{total_pending}건 처리")
 
 
 def get_overlap_positions(top_addrs: list, session: requests.Session, top_n: int = 20) -> dict:
@@ -515,8 +626,11 @@ class WhaleWatcher:
             w["total_volume"] = w.get("total_volume", 0) + trade["size_usdt"]
             w["last_seen"]    = trade["timestamp"]
             w["total_trades"] = w.get("total_trades", 0) + 1
-            # 최근 50건만 보관
-            w.setdefault("trades", []).append(trade)
+            # 최근 50건만 보관 (BUY는 action=None으로 태깅 → 정산 후 WIN/LOSS 갱신)
+            trade_entry = dict(trade)
+            if trade.get("side") == "BUY":
+                trade_entry.setdefault("action", None)
+            w.setdefault("trades", []).append(trade_entry)
             w["trades"] = w["trades"][-50:]
             save_whales_db(db)
 
@@ -573,19 +687,33 @@ def run_manager(client) -> WhaleWatcher:
                 for r in rows[:50]:
                     addr = r["address"]
                     if addr not in db:
+                        _pnl = round(r["pnl"], 2)
+                        _vol = round(r["vol"], 2)
+                        # Bootstrap 점수: leaderboard PNL 규모 기반 초기 점수
+                        # (full 스코어링 전 cold-start 방지 — whale_scorer._bootstrap_score 동일 공식)
+                        _impl_roi = (_pnl / _vol * 100) if _vol > 0 else 100.0
+                        if _pnl >= 50000:   _bs = 0.42
+                        elif _pnl >= 20000: _bs = 0.36
+                        elif _pnl >= 10000: _bs = 0.30
+                        elif _pnl >= 5000:  _bs = 0.26
+                        else:               _bs = 0.22
+                        if _vol > 0 and _impl_roi < 10.0:
+                            _bs = round(_bs * 0.8, 4)
+
                         db[addr] = {
-                            "address":      addr,
-                            "name":         r["name"],
-                            "total_trades": r["markets"],
-                            "wins":         0,
-                            "losses":       0,
-                            "total_pnl":    round(r["pnl"], 2),
-                            "total_volume": round(r["vol"], 2),
-                            "score":        0.0,
-                            "status":       "seeded",
-                            "leaderboard_pnl": round(r["pnl"], 2),
-                            "last_seen":    int(time.time()),
-                            "trades":       [],
+                            "address":         addr,
+                            "name":            r["name"],
+                            "total_trades":    r["markets"],
+                            "wins":            0,
+                            "losses":          0,
+                            "total_pnl":       _pnl,
+                            "total_volume":    _vol,
+                            "score":           _bs,
+                            "status":          "seeded",
+                            "leaderboard_pnl": _pnl,
+                            "last_seen":       int(time.time()),
+                            "trades":          [],
+                            "bootstrap":       True,
                         }
                         added += 1
                     else:
@@ -599,6 +727,9 @@ def run_manager(client) -> WhaleWatcher:
 
                 # 스냅샷 저장 (scorer delta 계산용)
                 save_leaderboard_snapshot(rows)
+
+                # pending BUY 거래 정산 확인 (RESOLVED 마켓 WIN/LOSS 갱신)
+                settle_pending_trades()
 
                 # 상위 20명 현재 포지션 → overlap 맵 갱신
                 top_addrs = [r["address"] for r in rows[:20]]

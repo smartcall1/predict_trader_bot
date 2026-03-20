@@ -192,6 +192,14 @@ class WhaleScorer:
                 cursor = page_info.get("endCursor")
                 time.sleep(0.3)
 
+            except requests.exceptions.HTTPError as e:
+                body_text = ""
+                try:
+                    body_text = e.response.text[:200]
+                except Exception:
+                    pass
+                print(f"[Scorer][ERR] fetch_resolved_positions({address[:8]}): {e} | body={body_text}")
+                break
             except Exception as e:
                 print(f"[Scorer][ERR] fetch_resolved_positions({address[:8]}): {e}")
                 break
@@ -237,8 +245,26 @@ class WhaleScorer:
           - category: str
           - timestamp: int
         """
+        # DB 포맷 정규화: REST 감지 거래는 price/question 필드 → 표준 포맷으로 변환
+        # action=None(pending) 및 SELL 제외 — 실제 정산된 WIN/LOSS만 스코어링
+        normalized = []
+        for t in trades:
+            action = t.get("action")
+            if action not in ("WIN", "LOSS"):
+                continue
+            normalized.append({
+                "action":      action,
+                "pnl":         t.get("pnl", 0),
+                "size_usdt":   t.get("size_usdt", 0),
+                "entry_price": t.get("entry_price") or t.get("price", 0),
+                "category":    t.get("category") or classify_market(t.get("question", "")),
+                "timestamp":   t.get("timestamp", 0),
+            })
+        if normalized:
+            trades = normalized
+
         if len(trades) < config.MIN_TRADES:
-            return None
+            return self._bootstrap_score(address, whale_info)
 
         now_ts = time.time()
         cutoff_30 = now_ts - 30 * 86400
@@ -354,6 +380,55 @@ class WhaleScorer:
             "updated_at":       int(now_ts),
         }
 
+    def _bootstrap_score(self, address: str, whale_info: dict | None) -> dict | None:
+        """
+        leaderboard PNL 기반 초기 점수 (resolved positions 부족 시 사용)
+        full score로 덮어쓰이기 전 cold-start 문제 방지.
+        WR/빈도 데이터 없이 PNL 규모만으로 보수적 점수 부여.
+        """
+        lb_pnl = (whale_info or {}).get("leaderboard_pnl", 0) or 0
+        vol    = (whale_info or {}).get("total_volume", 0) or 0
+        if lb_pnl <= 0:
+            return None
+
+        # PNL 규모별 계단식 기본 점수 (리더보드 진입 자체가 수익성 증거)
+        if lb_pnl >= 50000:
+            base = 0.42
+        elif lb_pnl >= 20000:
+            base = 0.36
+        elif lb_pnl >= 10000:
+            base = 0.30
+        elif lb_pnl >= 5000:
+            base = 0.26
+        else:
+            base = 0.22  # min_pnl=2000 통과한 최소 등급
+
+        # ROI 보정: 고볼륨 저수익 → MM 패턴 감점
+        implied_roi = (lb_pnl / vol * 100) if vol > 0 else 100.0
+        if vol > 0 and implied_roi < 10.0:
+            base = round(base * 0.8, 4)
+
+        now_ts = int(time.time())
+        return {
+            "address":          address,
+            "score":            round(base, 4),
+            "win_rate":         None,
+            "roi":              round(implied_roi, 1),
+            "total_trades":     (whale_info or {}).get("total_trades", 0),
+            "resolved_trades":  0,
+            "wins":             0,
+            "losses":           0,
+            "total_pnl":        round(lb_pnl, 2),
+            "recent_wr":        None,
+            "confidence":       0.5,
+            "recency_penalty":  1.0,
+            "activity_penalty": 1.0,
+            "delta_bonus":      0.0,
+            "category_stats":   {},
+            "bootstrap":        True,
+            "updated_at":       now_ts,
+        }
+
     def _compute_delta_bonus(self, address: str, whale_info: dict) -> float:
         """
         스냅샷 델타 보너스: 최근 6시간 PnL 증가량 기반 활동 가중치
@@ -364,12 +439,14 @@ class WhaleScorer:
                 return 0.0
             with open(SNAPSHOT_FILE, "r", encoding="utf-8") as f:
                 snap = json.load(f)
-            prev = snap.get(address)
-            if not prev:
+            # snapshot 구조: {"timestamp": int, "rows": [{address, pnl, ...}]}
+            rows = snap.get("rows", [])
+            prev_row = next((r for r in rows if r.get("address") == address), None)
+            if not prev_row:
                 return 0.0
-            prev_pnl = prev.get("pnlUsd", 0)
+            prev_pnl = prev_row.get("pnl", 0)
             curr_pnl = (whale_info or {}).get("leaderboard_pnl", 0)
-            snap_age = time.time() - prev.get("ts", 0)
+            snap_age = time.time() - snap.get("timestamp", 0)
             if snap_age <= 0 or snap_age > 24 * 3600:
                 return 0.0
             delta_per_hour = (curr_pnl - prev_pnl) / (snap_age / 3600)
@@ -399,6 +476,7 @@ class WhaleScorer:
             return
 
         now_ts = int(time.time())
+        print(f"[Scorer] 점수 갱신 시작 — {len(db)}마리")
 
         # Pruning: score < 0.3 AND 14일+ 미활동
         prune_targets = [
@@ -412,32 +490,46 @@ class WhaleScorer:
             print(f"[Scorer] Pruning: {len(prune_targets)}마리 제거 → 잔여 {len(db)}마리")
 
         # 점수 갱신
-        updated = 0
-        for addr, whale in db.items():
-            # GraphQL resolved positions 조회
-            trades = self.fetch_resolved_positions(addr)
-            if not trades:
-                # fallback: DB 저장 trades
-                trades = whale.get("trades", [])
-            result = self.score_whale(addr, trades, whale_info=whale)
-            if result:
-                whale.update(result)
-                updated += 1
-                # status 판정
-                score = result["score"]
-                if score >= 0.6:
-                    whale["status"] = "active"
-                elif score < 0.45:
-                    whale["status"] = "inactive"
-                # 카테고리 통계 업데이트
-                if result.get("category_stats"):
-                    whale["category_stats"] = result["category_stats"]
+        full_cnt = 0
+        bootstrap_cnt = 0
+        failed = 0
 
+        for addr, whale in list(db.items()):
+            try:
+                # leaderboard_pnl 없는 고래는 predict.fun 계정 미등록 → GraphQL 조회 불필요
+                lb_pnl = whale.get("leaderboard_pnl", 0) or 0
+                if lb_pnl > 0:
+                    trades = self.fetch_resolved_positions(addr)
+                else:
+                    trades = whale.get("trades", [])
+                if not trades:
+                    trades = whale.get("trades", [])
+                result = self.score_whale(addr, trades, whale_info=whale)
+                if result:
+                    whale.update(result)
+                    if result.get("bootstrap"):
+                        bootstrap_cnt += 1
+                    else:
+                        full_cnt += 1
+                        whale.pop("bootstrap", None)  # full 스코어 됐으면 bootstrap 플래그 제거
+                    # status 판정
+                    score = result["score"]
+                    if score >= 0.6:
+                        whale["status"] = "active"
+                    elif score < 0.45:
+                        whale["status"] = "inactive"
+                    if result.get("category_stats"):
+                        whale["category_stats"] = result["category_stats"]
+                else:
+                    failed += 1
+            except Exception as e:
+                print(f"[Scorer][ERR] {addr[:8]}... 점수 갱신 실패: {e}")
+                failed += 1
             time.sleep(0.5)  # API rate limit
 
         self.save_db(db)
         active = sum(1 for w in db.values() if w.get("status") == "active")
-        print(f"[Scorer] {updated}/{len(db)} 고래 점수 갱신 | active={active}마리")
+        print(f"[Scorer] 완료 — full={full_cnt} bootstrap={bootstrap_cnt} 실패={failed} | active={active}마리")
 
     def get_active_whales(self, min_score: float = 0.2) -> list:
         """점수 기준 이상 활성 고래 목록"""

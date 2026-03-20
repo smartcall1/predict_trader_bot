@@ -59,13 +59,10 @@ class PredictCopyBot:
         self.client  = PredictFunClient()
         self.scorer  = WhaleScorer()
 
-        # 시작 시 고래 DB 카운트 초기화 (6시간 대기 없이 즉시 표시)
+        # 시작 시 고래 DB 카운트 초기화 (score >= 0.2 기준)
         try:
             db = load_whales_db()
-            self._active_whale_count = sum(
-                1 for w in db.values()
-                if w.get("score", 0) >= 0.2 or w.get("leaderboard_pnl", 0) > 0
-            )
+            self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.2)
         except Exception:
             pass
 
@@ -656,11 +653,7 @@ class PredictCopyBot:
                 if now - last_score_update > 6 * 3600:
                     self.scorer.update_all()
                     db = load_whales_db()
-                    self._active_whale_count = sum(
-                        1 for w in db.values()
-                        if w.get("score", 0) >= 0.2
-                        or w.get("leaderboard_pnl", 0) > 0
-                    )
+                    self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.2)
                     last_score_update = now
                 self._save_state()
             except Exception as e:
@@ -847,25 +840,19 @@ class PredictCopyBot:
     def _send_telegram_whales(self):
         try:
             db = load_whales_db()
-            active = [
-                w for w in db.values()
-                if w.get("score", 0) >= 0.2 or w.get("leaderboard_pnl", 0) > 0
-            ]
-            # score 우선, 동점이면 leaderboard_pnl 기준 내림차순
-            active.sort(key=lambda w: (w.get("score", 0), w.get("leaderboard_pnl", 0)), reverse=True)
+            active = [w for w in db.values() if w.get("score", 0) >= 0.2]
+            active.sort(key=lambda w: w.get("score", 0), reverse=True)
             if not active:
-                tg_notifier.send_message("🐳 <b>추적 고래 없음</b>")
+                tg_notifier.send_message("🐳 <b>추적 고래 없음</b>\n(score >= 0.2 고래 없음)")
                 return
             rows = []
             for i, w in enumerate(active[:30], 1):
                 name = w.get("name") or w.get("address", "?")[:10]
                 score = w.get("score", 0.0)
                 pnl = w.get("leaderboard_pnl", 0.0)
-                if score >= 0.2:
-                    stat = f"{score*100:.1f}점"
-                else:
-                    stat = f"PnL ${pnl:+.0f}"
-                rows.append(f"{i}. {name} — {stat}")
+                tag = "🔷" if w.get("bootstrap") else "⭐"
+                stat = f"{score*100:.1f}점 (PnL ${pnl:+.0f})"
+                rows.append(f"{i}. {tag}{name} — {stat}")
             msg = (
                 f"🐳 <b>추적 고래 ({len(active)}마리)</b>\n"
                 "─────────────────\n" +
