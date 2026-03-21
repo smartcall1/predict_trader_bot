@@ -47,6 +47,8 @@ class PredictCopyBot:
         self.stats = {
             "total_bets": 0, "wins": 0, "losses": 0,
             "total_pnl": 0.0, "max_drawdown": 0.0,
+            # 섀도우(반대편) 포트폴리오: 고래와 반대로 배팅했을 때의 가상 성과
+            "shadow_wins": 0, "shadow_losses": 0, "shadow_pnl": 0.0,
         }
 
         suffix = "_PAPER" if config.PAPER_TRADING else "_LIVE"
@@ -439,6 +441,24 @@ class PredictCopyBot:
         else:
             self.stats["losses"] += 1
 
+        # ── 섀도우(반대편) PnL 계산 ──
+        # 동일 금액을 반대 outcome(1 - entry_price)에 투자했을 때의 가상 수익
+        _entry = pos["entry_price"]
+        _size  = pos["size_usdc"]
+        _shadow_entry = 1.0 - _entry
+        if _shadow_entry > 0.01:  # 0에 가까우면 계산 무의미
+            _shadow_shares = _size / _shadow_entry
+            _shadow_sell   = 1.0 - sell_price  # 반대편 가격
+            _shadow_pnl    = _shadow_shares * _shadow_sell - _size
+            self.stats.setdefault("shadow_pnl", 0.0)
+            self.stats.setdefault("shadow_wins", 0)
+            self.stats.setdefault("shadow_losses", 0)
+            self.stats["shadow_pnl"] += _shadow_pnl
+            if _shadow_pnl >= 0:
+                self.stats["shadow_wins"] += 1
+            else:
+                self.stats["shadow_losses"] += 1
+
         with self._position_lock:
             self.positions.pop(pos_key, None)
 
@@ -631,6 +651,10 @@ class PredictCopyBot:
             self.bankroll      = state.get("bankroll", self.bankroll)
             self.peak_bankroll = state.get("peak_bankroll", self.bankroll)
             self.stats         = state.get("stats", self.stats)
+            # 섀도우 필드 호환: 기존 state에 없으면 0으로 초기화
+            self.stats.setdefault("shadow_wins", 0)
+            self.stats.setdefault("shadow_losses", 0)
+            self.stats.setdefault("shadow_pnl", 0.0)
             self.positions     = state.get("positions", {})
             for tx in state.get("seen_txs", []):
                 self.seen_txs[tx] = 0
@@ -759,6 +783,10 @@ class PredictCopyBot:
                 f"📉 미실현 PnL: ${unrealized:+.2f}\n"
                 f"🎯 승률: {win_rate:.1f}% ({self.stats['wins']}W/{self.stats['losses']}L)\n"
                 f"{roi_line}"
+                f"{sep}\n"
+                f"🔄 <b>반대편 섀도우</b>\n"
+                f"📈 섀도우 PnL: ${self.stats.get('shadow_pnl', 0):+.2f}\n"
+                f"🎯 섀도우 승률: {(self.stats.get('shadow_wins',0) / max(1, self.stats.get('shadow_wins',0) + self.stats.get('shadow_losses',0)) * 100):.1f}% ({self.stats.get('shadow_wins',0)}W/{self.stats.get('shadow_losses',0)}L)\n"
                 f"{sep}\n"
                 f"📌 활성 포지션: {len(self.positions)}개\n"
                 f"🐳 추적 고래: {self._active_whale_count}마리\n"
