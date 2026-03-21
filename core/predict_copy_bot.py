@@ -416,6 +416,7 @@ class PredictCopyBot:
             side=0,  # BUY
             price=price,
             size_usdt=bet_size,
+            slippage_bps=0,  # pending 대기열에서 이미 목표가 필터링 완료 → 이중 슬리피지 방지
             outcome_name=outcome_name,
             token_id=token_id,
         )
