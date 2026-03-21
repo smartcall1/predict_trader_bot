@@ -40,6 +40,8 @@ class PredictCopyBot:
         self._last_save_time = 0
         self._active_whale_count = 0
         self._pending_confirm = None
+        self.pending_orders: list = []          # 지정가 대기 큐 (1분 관찰)
+        self._void_price_counter: dict = {}     # VOID 마켓 감지 (가격 고착 카운터)
 
         # 자산
         self.bankroll = config.INITIAL_BANKROLL
@@ -96,6 +98,9 @@ class PredictCopyBot:
                 whale_trades = self.watcher.pop_recent_trades()
                 for trade in whale_trades:
                     self._handle_whale_trade(trade)
+
+                # 대기열 주문 처리 (매 사이클)
+                self._process_pending_orders()
 
                 # 포지션 정산 체크 (60초마다)
                 if int(time.time()) % 60 < 5:
@@ -268,7 +273,13 @@ class PredictCopyBot:
 
         # ── 베팅금 계산 ──
         portfolio = self._get_portfolio()
-        bet_size = portfolio / config.BET_DIVISOR
+        _base_bet = portfolio / config.BET_DIVISOR
+        # 스코어 가중치: 고래 점수에 비례하여 배팅금 조절
+        _score_val = (whale_info or {}).get("score", 0)
+        _weight = max(0.2, min(_score_val * 2, 1.0))  # score 0~1 → weight 0.2~1.0
+        # 역배 제한: entry_price < 0.35일 때 (price/0.35)² 곡선 적용
+        _underdog_factor = min(1.0, (price / 0.35) ** 2) if price < 0.35 else 1.0
+        bet_size = _base_bet * _weight * _underdog_factor
         if bet_size > self.bankroll:
             bet_size = self.bankroll * 0.9
         if bet_size < 1.0:
@@ -277,7 +288,6 @@ class PredictCopyBot:
         whale_name = (whale_info or {}).get("name", addr[:8])
 
         # ── Overlap 배율: 0.4 반감 수렴 공식 (최대 ≈×1.667) ──
-        # multiplier = 1 + 0.4 + 0.4² + ... → 겹침 1명 추가마다 효과 40% 감쇠
         overlap_count = self._get_overlap_count(market_id)
         if overlap_count >= 2:
             bonus = sum(0.4 ** i for i in range(1, overlap_count))
@@ -285,10 +295,33 @@ class PredictCopyBot:
             bet_size = min(bet_size * multiplier, self.bankroll * 0.9)
             print(f"[Bot] [OVERLAP {overlap_count}명] 배율 {multiplier:.3f}x 적용: ${bet_size:.2f}")
 
-        # ── 동방향 진입: 고래와 동일 outcome 매수 ──
-        print(f"[Bot] [COPY] {whale_name} BUY {outcome_name}@{price:.3f} | ${bet_size:.2f} | overlap={overlap_count}")
-        self._execute_trade(market_id, market, price, bet_size, addr, whale_name,
-                            outcome_name, token_id)
+        # ── Pending 중복 등록 방지 ──
+        _already_pending = any(
+            o.get("market_id") == market_id and o.get("outcome_name") == outcome_name
+            for o in self.pending_orders
+        )
+        if _already_pending:
+            print(f"[Bot] [SKIP] 동일 마켓 이미 대기열에 등록됨 (중복 pending 차단)")
+            return
+
+        # ── 대기열 등록 (1분 관찰, 목표가 = 고래가 + 슬리피지) ──
+        target_price = min(0.99, price * (1 + config.DEFAULT_SLIPPAGE_BPS / 10_000))
+        _ud_str = f" ×역배{_underdog_factor:.0%}" if _underdog_factor < 1.0 else ""
+        _wt_str = f" ×점수{_weight:.0%}" if _weight < 1.0 else ""
+        print(f"⏳ [PENDING] 🐋 {whale_name} 픽 감지 -> 대기열 등록 (1분 관찰, 목표가 ${target_price:.3f}, 배팅 ${bet_size:.2f}{_ud_str}{_wt_str})")
+        self.pending_orders.append({
+            "trade": trade,
+            "market": market,
+            "market_id": market_id,
+            "whale_name": whale_name,
+            "whale_addr": addr,
+            "whale_price": price,
+            "target_price": target_price,
+            "bet_size": bet_size,
+            "outcome_name": outcome_name,
+            "token_id": token_id,
+            "expires_at": time.time() + 60,
+        })
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
         """고래 SELL 감지 → 동일 마켓 동방향 포지션 조기 청산 (이익/본전일 때만)"""
@@ -334,6 +367,46 @@ class PredictCopyBot:
     # 주문 실행
     # ──────────────────────────────────────────────
 
+    def _process_pending_orders(self):
+        """대기열 주문 처리: 매 사이클마다 best_ask 확인, 목표가 이하 시 체결"""
+        if not self.pending_orders:
+            return
+
+        now = time.time()
+        active_orders = []
+
+        for order in self.pending_orders:
+            # 만료 체크
+            if now > order["expires_at"]:
+                print(f"⏰ [EXPIRED] {order['whale_name']} 픽 체결 실패 (시장가가 목표가 ${order['target_price']:.3f} 이내로 오지 않음)")
+                continue
+
+            market_id = order["market_id"]
+            outcome_name = order.get("outcome_name", "")
+
+            # 현재 best_ask 조회
+            _is_no = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
+            if _is_no:
+                yes_bid = self.client.get_best_price(market_id, side="SELL")
+                current_ask = round(1.0 - yes_bid, 4) if yes_bid is not None else None
+            else:
+                current_ask = self.client.get_best_price(market_id, side="BUY")
+
+            if current_ask is not None and current_ask <= order["target_price"]:
+                print(f"✅ [PENDING Filled] 🐋 {order['whale_name']} 픽 체결! (ask: ${current_ask:.3f} <= 목표가 ${order['target_price']:.3f})")
+                self._execute_trade(
+                    market_id, order["market"], order["whale_price"],
+                    order["bet_size"], order["whale_addr"], order["whale_name"],
+                    outcome_name, order.get("token_id", ""),
+                )
+            else:
+                remain = int(order["expires_at"] - now)
+                ask_str = f"${current_ask:.3f}" if current_ask is not None else "None(유동성없음)"
+                print(f"⏳ [PENDING Wait] {order['whale_name']} 대기중 (ask={ask_str} > 목표가 ${order['target_price']:.3f}, 잔여 {remain}s)")
+                active_orders.append(order)
+
+        self.pending_orders = active_orders
+
     def _execute_trade(self, market_id: str, market: dict, price: float,
                         bet_size: float, whale_addr: str, whale_name: str,
                         outcome_name: str = "", token_id: str = ""):
@@ -372,6 +445,11 @@ class PredictCopyBot:
         )
 
         with self._position_lock:
+            # Double-Check: Lock 획득 후 동일 마켓 중복 재확인 (WebSocket race condition 방어)
+            if any(p.get("marketId") == market_id for p in self.positions.values()):
+                print(f"[Bot] [SKIP] Lock 내 중복 감지 → 체결 취소: {market_id[:12]}...")
+                self.bankroll += bet_size  # 이미 차감된 경우 복구
+                return
             self.positions[pos_key] = {
                 "marketId":     market_id,
                 "whale_addr":   whale_addr,
@@ -530,15 +608,49 @@ class PredictCopyBot:
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
-                # 손절 체크 (No 결과물: 현재가 = 1 - YES ask)
+                # 현재가 조회 (No 결과물: 현재가 = 1 - YES ask)
                 _pos_is_no = pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
                 if _pos_is_no:
                     yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
                     current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
                 else:
                     current = self.client.get_best_price(pos["marketId"], side="SELL")
+
                 if current is not None:
                     pos["current_price"] = current
+
+                    # [우선순위 1] 자동 익절: 현재가 0.98 이상 → 만기 기다리지 않고 즉시 매도
+                    if current >= 0.98:
+                        print(f"[Bot] 🟢 자동 익절: {pos_key[:12]}... (현재가 {current:.3f} >= 0.98)")
+                        self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
+                        continue
+
+                    # [우선순위 2] VOID 마켓 감지: 가격 0.48~0.52 고착 8회 연속
+                    if 0.48 <= current <= 0.52:
+                        cnt = self._void_price_counter.get(pos_key, 0) + 1
+                        self._void_price_counter[pos_key] = cnt
+                        if cnt >= 8:
+                            print(f"[Bot] ⚪ VOID 감지 (가격 {current:.3f} 고착 {cnt}회): {pos_key[:12]}...")
+                            # VOID: 원금 복구, W/L 미반영
+                            self.bankroll += pos["size_usdc"]
+                            with self._position_lock:
+                                self.positions.pop(pos_key, None)
+                            self._void_price_counter.pop(pos_key, None)
+                            self._save_state()
+                            self._log_trade("VOID", pos_key, current, 0, pos)
+                            tg_notifier.send_message(f"⚪ <b>VOID</b>\n📊 {pos.get('question', pos_key)[:40]}\n💵 원금 ${pos['size_usdc']:.2f} 복구")
+                            continue
+                    else:
+                        self._void_price_counter.pop(pos_key, None)
+
+                    # [우선순위 3] Hard Stop -90% — 비활성화 (2026-03-21)
+                    # 사유: -90% 시점에서 건질 금액이 거의 없고, 회복 가능성만 차단함
+                    # roi = (current - pos["entry_price"]) / pos["entry_price"]
+                    # if roi <= -0.90:
+                    #     self._execute_sell(pos_key, pos, current, reason="STOP_LOSS")
+                    #     continue
+
+                    # [우선순위 4] 일반 손절 -40%
                     drop = (pos["entry_price"] - current) / pos["entry_price"]
                     if drop >= config.STOP_LOSS_PCT:
                         print(f"[Bot] 🔴 손절: {pos_key[:12]}... ({drop:.0%} 하락)")
