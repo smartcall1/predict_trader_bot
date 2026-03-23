@@ -50,8 +50,9 @@ class Config:
     MIN_TRADES   = int(os.getenv("MIN_TRADES", "5"))
 
     # === 시스템 ===
-    PAPER_TRADING = os.getenv("PAPER_TRADING", "True").lower() == "true"
-    DEBUG_MODE    = os.getenv("DEBUG_MODE", "True").lower() == "true"
+    PAPER_TRADING    = os.getenv("PAPER_TRADING", "True").lower() == "true"
+    DEBUG_MODE       = os.getenv("DEBUG_MODE", "True").lower() == "true"
+    CONTRARIAN_MODE  = os.getenv("CONTRARIAN_MODE", "False").lower() == "true"
 
     # === Telegram 알림 ===
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

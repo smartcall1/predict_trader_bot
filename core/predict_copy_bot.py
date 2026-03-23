@@ -78,6 +78,8 @@ class PredictCopyBot:
         threading.Thread(target=self._telegram_poll_loop, daemon=True).start()
 
         mode = "PAPER" if config.PAPER_TRADING else "LIVE"
+        if config.CONTRARIAN_MODE:
+            mode += " CONTRARIAN"
         print(f"[Bot] PredictCopyBot 시작 ({mode}) — 초기 뱅크롤 ${self.bankroll:.2f}")
         tg_notifier.send_message(
             f"🚀 <b>Predict.fun 봇 시작 [{mode}]</b>\n"
@@ -85,6 +87,21 @@ class PredictCopyBot:
             f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
             reply_markup=self._tg_keyboard(),
         )
+
+    # ──────────────────────────────────────────────
+    # Contrarian 유틸리티
+    # ──────────────────────────────────────────────
+
+    def _resolve_contrarian_outcome(self, market: dict, original_outcome_name: str) -> tuple:
+        """반대 outcome의 (name, token_id) 반환. 바이너리 마켓(2 outcomes) 전용."""
+        outcomes = market.get("outcomes", [])
+        if len(outcomes) != 2:
+            print(f"[Bot][WARN] 비바이너리 마켓 ({len(outcomes)} outcomes) → Contrarian 스킵")
+            return (original_outcome_name, "")
+        for o in outcomes:
+            if o.get("name", "").upper() != original_outcome_name.upper():
+                return (o.get("name", ""), o.get("onChainId", ""))
+        return (original_outcome_name, "")
 
     # ──────────────────────────────────────────────
     # 메인 루프
@@ -156,12 +173,13 @@ class PredictCopyBot:
             return
 
         # ── Filter 3: 가격 범위 ──
-        if price < config.MIN_PRICE or price > config.MAX_PRICE:
+        _filter_price = (1.0 - price) if config.CONTRARIAN_MODE else price
+        if _filter_price < config.MIN_PRICE or _filter_price > config.MAX_PRICE:
             return
 
         # ── Filter 3.5: 0.50~0.60 구간 차단 (수익성 불명확 구간) ──
-        if 0.50 <= price <= 0.60:
-            print(f"[Bot] [SKIP] 0.50~0.60 가격 구간 차단: {price:.3f}")
+        if 0.50 <= _filter_price <= 0.60:
+            print(f"[Bot] [SKIP] 0.50~0.60 가격 구간 차단: {_filter_price:.3f}")
             return
 
         # ── Filter 4: 고래 스코어 확인 ──
@@ -247,6 +265,15 @@ class PredictCopyBot:
         except Exception:
             pass  # 파싱 실패 시 통과 (방어적)
 
+        # ── Contrarian Mode: outcome 반전 ──
+        if config.CONTRARIAN_MODE:
+            _orig_outcome = outcome_name
+            outcome_name, token_id = self._resolve_contrarian_outcome(market, outcome_name)
+            if outcome_name == _orig_outcome:
+                print(f"[Bot] [SKIP] Contrarian 반전 불가: {market_id[:12]}...")
+                return
+            print(f"[Bot] [CONTRARIAN] 🔄 {_orig_outcome} → {outcome_name} 반전")
+
         # ── Filter 6: 스프레드 과다 차단 (>15%) + 가격 이탈 방어 ──
         ob = self.client.get_orderbook(market_id)
         spread = self._get_orderbook_spread(ob)
@@ -278,7 +305,8 @@ class PredictCopyBot:
         _score_val = (whale_info or {}).get("score", 0)
         _weight = max(0.2, min(_score_val * 2, 1.0))  # score 0~1 → weight 0.2~1.0
         # 역배 제한: entry_price < 0.35일 때 (price/0.35)² 곡선 적용
-        _underdog_factor = min(1.0, (price / 0.35) ** 2) if price < 0.35 else 1.0
+        _bet_price = (1.0 - price) if config.CONTRARIAN_MODE else price
+        _underdog_factor = min(1.0, (_bet_price / 0.35) ** 2) if _bet_price < 0.35 else 1.0
         bet_size = _base_bet * _weight * _underdog_factor
         if bet_size > self.bankroll:
             bet_size = self.bankroll * 0.9
@@ -620,11 +648,27 @@ class PredictCopyBot:
                 if current is not None:
                     pos["current_price"] = current
 
-                    # [우선순위 1] 자동 익절: 현재가 0.98 이상 → 만기 기다리지 않고 즉시 매도
-                    if current >= 0.98:
-                        print(f"[Bot] 🟢 자동 익절: {pos_key[:12]}... (현재가 {current:.3f} >= 0.98)")
-                        self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
-                        continue
+                    # [우선순위 1] 자동 익절
+                    if config.CONTRARIAN_MODE:
+                        # Contrarian 구간별 차등 익절:
+                        #   역진입가 >= 0.70 → +20% 익절 (만기 ROI 13~25%라 빠른 회전 유리)
+                        #   역진입가 0.50~0.69 → 만기 보유 (50~80% ROI 기대)
+                        #   역진입가 < 0.50 → 만기 보유 (300%+ ROI 기대)
+                        _c_entry = pos["entry_price"]
+                        _roi = (current - _c_entry) / _c_entry if _c_entry > 0 else 0
+                        if _c_entry >= 0.70 and _roi >= 0.20:
+                            print(f"[Bot] 🟢 Contrarian 익절 (고가진입 {_c_entry:.2f}, +{_roi:.0%}): {pos_key[:12]}...")
+                            self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
+                            continue
+                        elif current >= 0.98:
+                            print(f"[Bot] 🟢 자동 익절: {pos_key[:12]}... (현재가 {current:.3f} >= 0.98)")
+                            self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
+                            continue
+                    else:
+                        if current >= 0.98:
+                            print(f"[Bot] 🟢 자동 익절: {pos_key[:12]}... (현재가 {current:.3f} >= 0.98)")
+                            self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
+                            continue
 
                     # [우선순위 2] VOID 마켓 감지: 가격 0.48~0.52 고착 8회 연속
                     if 0.48 <= current <= 0.52:
@@ -863,6 +907,8 @@ class PredictCopyBot:
             unrealized = pos_value - invested
             portfolio = self.bankroll + pos_value
             mode_str = "LIVE" if not config.PAPER_TRADING else "🟡 PAPER"
+            if config.CONTRARIAN_MODE:
+                mode_str += " CONTRARIAN"
             sep = "─────────────────"
 
             roi_line = ""
@@ -897,7 +943,7 @@ class PredictCopyBot:
                 f"🎯 승률: {win_rate:.1f}% ({self.stats['wins']}W/{self.stats['losses']}L)\n"
                 f"{roi_line}"
                 f"{sep}\n"
-                f"🔄 <b>반대편 섀도우</b>\n"
+                f"🔄 <b>{'원래방향 섀도우' if config.CONTRARIAN_MODE else '반대편 섀도우'}</b>\n"
                 f"📈 섀도우 PnL: ${self.stats.get('shadow_pnl', 0):+.2f}\n"
                 f"🎯 섀도우 승률: {(self.stats.get('shadow_wins',0) / max(1, self.stats.get('shadow_wins',0) + self.stats.get('shadow_losses',0)) * 100):.1f}% ({self.stats.get('shadow_wins',0)}W/{self.stats.get('shadow_losses',0)}L)\n"
                 f"{sep}\n"
