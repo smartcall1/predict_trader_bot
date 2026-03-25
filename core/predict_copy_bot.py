@@ -187,14 +187,23 @@ class PredictCopyBot:
         whale_info = db.get(addr)
         if whale_info:
             score = whale_info.get("score", 0)
-            if score > 0 and score < 0.2:
-                return
-            # 미평가 고래(score=0): 리더보드 검증(pnl>0)이거나 vol >= $2K 이상만 허용
-            if score == 0:
-                lb_pnl = whale_info.get("leaderboard_pnl", 0)
-                vol = whale_info.get("total_volume", 0)
-                if lb_pnl <= 0 and vol < 2000:
-                    print(f"[Bot] [SKIP] 미평가 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
+            is_bootstrap = whale_info.get("bootstrap", False)
+            lb_pnl = whale_info.get("leaderboard_pnl", 0) or 0
+            vol = whale_info.get("total_volume", 0) or 0
+
+            if is_bootstrap:
+                # bootstrap 고래: 리더보드 PnL 기준으로 판단 (score 기준 아님)
+                # lb_pnl $5000 이상만 허용 — 검증 안 된 고래 최소 필터
+                if lb_pnl < 5000:
+                    print(f"[Bot] [SKIP] bootstrap 고래 lb_pnl 미달 (${lb_pnl:.0f}): {addr[:8]}")
+                    return
+            else:
+                # 실데이터 고래: score 기준 (데이터 축적 단계 → 0.07 이상)
+                if score > 0 and score < 0.07:
+                    return
+                # 미평가 고래(score=0): vol >= $2K 이상만 허용
+                if score == 0 and lb_pnl <= 0 and vol < 2000:
+                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
             # DB에 없는 완전 신규 고래 → $1000 이상 거래만 허용
