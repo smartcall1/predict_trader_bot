@@ -1042,19 +1042,25 @@ class PredictCopyBot:
                 tg_notifier.send_message("🐳 <b>추적 고래 없음</b>\n(score >= 0.05 고래 없음)")
                 return
             rows = []
-            for i, w in enumerate(active[:30], 1):
+            for i, w in enumerate(active, 1):
                 name = w.get("name") or w.get("address", "?")[:10]
                 score = w.get("score", 0.0)
                 pnl = w.get("leaderboard_pnl", 0.0)
                 tag = "🔷" if w.get("bootstrap") else "⭐"
                 stat = f"{score*100:.1f}점 (PnL ${pnl:+.0f})"
                 rows.append(f"{i}. {tag}{name} — {stat}")
-            msg = (
-                f"🐳 <b>추적 고래 ({len(active)}마리)</b>\n"
-                "─────────────────\n" +
-                "\n".join(rows)
-            )
-            tg_notifier.send_message(msg)
+            # 25마리씩 페이지 분할 (텔레그램 4096자 제한 대응)
+            PAGE = 25
+            total = len(active)
+            pages = [rows[i:i+PAGE] for i in range(0, len(rows), PAGE)]
+            for p_idx, page_rows in enumerate(pages):
+                page_info = f" ({p_idx+1}/{len(pages)})" if len(pages) > 1 else ""
+                msg = (
+                    f"🐳 <b>추적 고래 ({total}마리){page_info}</b>\n"
+                    "─────────────────\n" +
+                    "\n".join(page_rows)
+                )
+                tg_notifier.send_message(msg)
         except Exception as e:
             print(f"[Bot][WARN] 고래 목록 전송 실패: {e}")
 

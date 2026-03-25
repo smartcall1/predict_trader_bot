@@ -37,6 +37,33 @@ class TelegramNotifier:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
+            # 텔레그램 4096자 제한 — 초과 시 줄 단위 분할 전송
+            if len(text) > 4096:
+                lines = text.split('\n')
+                chunk = ''
+                last_id = None
+                for line in lines:
+                    if len(chunk) + len(line) + 1 > 4090:
+                        payload['text'] = chunk
+                        try:
+                            r = requests.post(url, json=payload, timeout=10)
+                            r.raise_for_status()
+                            last_id = r.json().get("result", {}).get("message_id")
+                        except Exception as e:
+                            logger.error(f"Failed to send telegram message chunk: {e}")
+                        chunk = line
+                    else:
+                        chunk = (chunk + '\n' + line) if chunk else line
+                if chunk:
+                    payload['text'] = chunk
+                    try:
+                        r = requests.post(url, json=payload, timeout=10)
+                        r.raise_for_status()
+                        last_id = r.json().get("result", {}).get("message_id")
+                    except Exception as e:
+                        logger.error(f"Failed to send telegram message chunk: {e}")
+                self.last_msg_id = last_id
+                return last_id
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
             msg_id = response.json().get("result", {}).get("message_id")
