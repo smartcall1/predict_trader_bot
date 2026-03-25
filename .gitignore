@@ -14,7 +14,7 @@ logs/
 
 # Project specific
 .stop_bot
-data/
+data/*
 !data/whales_predict.json
 
 # IDE
