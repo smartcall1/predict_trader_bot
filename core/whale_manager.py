@@ -627,9 +627,19 @@ class WhaleWatcher:
             w["last_seen"]    = trade["timestamp"]
             w["total_trades"] = w.get("total_trades", 0) + 1
             # 최근 50건만 보관 (BUY는 action=None으로 태깅 → 정산 후 WIN/LOSS 갱신)
-            trade_entry = dict(trade)
+            # [Fix] market 전체 객체 제외 — 파일 크기 폭증(23MB) 및 DB 손상 방지
+            trade_entry = {
+                "side":         trade.get("side"),
+                "price":        trade.get("price"),
+                "size_usdt":    trade.get("size_usdt"),
+                "outcome_name": trade.get("outcome_name"),
+                "token_id":     trade.get("token_id"),
+                "question":     trade.get("question"),
+                "marketId":     trade.get("marketId"),
+                "timestamp":    trade.get("timestamp"),
+            }
             if trade.get("side") == "BUY":
-                trade_entry.setdefault("action", None)
+                trade_entry["action"] = None
             w.setdefault("trades", []).append(trade_entry)
             w["trades"] = w["trades"][-50:]
             save_whales_db(db)
@@ -692,11 +702,12 @@ def run_manager(client) -> WhaleWatcher:
                         # Bootstrap 점수: leaderboard PNL 규모 기반 초기 점수
                         # (full 스코어링 전 cold-start 방지 — whale_scorer._bootstrap_score 동일 공식)
                         _impl_roi = (_pnl / _vol * 100) if _vol > 0 else 100.0
-                        if _pnl >= 50000:   _bs = 0.42
-                        elif _pnl >= 20000: _bs = 0.36
-                        elif _pnl >= 10000: _bs = 0.30
-                        elif _pnl >= 5000:  _bs = 0.26
-                        else:               _bs = 0.22
+                        # [Fix] 상한 0.15 — 실데이터 스코어와 역전 방지 (whale_scorer._bootstrap_score 동일)
+                        if _pnl >= 50000:   _bs = 0.15
+                        elif _pnl >= 20000: _bs = 0.13
+                        elif _pnl >= 10000: _bs = 0.11
+                        elif _pnl >= 5000:  _bs = 0.09
+                        else:               _bs = 0.07
                         if _vol > 0 and _impl_roi < 10.0:
                             _bs = round(_bs * 0.8, 4)
 

@@ -392,16 +392,17 @@ class WhaleScorer:
             return None
 
         # PNL 규모별 계단식 기본 점수 (리더보드 진입 자체가 수익성 증거)
+        # [Fix] 상한을 0.15로 낮춤 — 실데이터 스코어(최대 ~0.14)와 역전 방지
         if lb_pnl >= 50000:
-            base = 0.42
+            base = 0.15
         elif lb_pnl >= 20000:
-            base = 0.36
+            base = 0.13
         elif lb_pnl >= 10000:
-            base = 0.30
+            base = 0.11
         elif lb_pnl >= 5000:
-            base = 0.26
+            base = 0.09
         else:
-            base = 0.22  # min_pnl=2000 통과한 최소 등급
+            base = 0.07  # min_pnl=2000 통과한 최소 등급
 
         # ROI 보정: 고볼륨 저수익 → MM 패턴 감점
         implied_roi = (lb_pnl / vol * 100) if vol > 0 else 100.0
@@ -498,12 +499,15 @@ class WhaleScorer:
             try:
                 # leaderboard_pnl 없는 고래는 predict.fun 계정 미등록 → GraphQL 조회 불필요
                 lb_pnl = whale.get("leaderboard_pnl", 0) or 0
-                if lb_pnl > 0:
+                db_trades = whale.get("trades", [])
+                db_resolved = [t for t in db_trades if t.get("action") in ("WIN", "LOSS")]
+                # [Fix] DB에 실데이터(WIN/LOSS) 5건 이상이면 GraphQL 조회 불필요 — 실데이터 우선
+                if lb_pnl > 0 and len(db_resolved) < config.MIN_TRADES:
                     trades = self.fetch_resolved_positions(addr)
                 else:
-                    trades = whale.get("trades", [])
+                    trades = db_trades
                 if not trades:
-                    trades = whale.get("trades", [])
+                    trades = db_trades
                 result = self.score_whale(addr, trades, whale_info=whale)
                 if result:
                     whale.update(result)
