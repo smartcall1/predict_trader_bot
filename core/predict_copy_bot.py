@@ -63,10 +63,10 @@ class PredictCopyBot:
         self.client  = PredictFunClient()
         self.scorer  = WhaleScorer()
 
-        # 시작 시 고래 DB 카운트 초기화 (score >= 0.2 기준)
+        # 시작 시 고래 DB 카운트 초기화 (score >= 0.05 기준 — bootstrap 0.07~0.15 포함)
         try:
             db = load_whales_db()
-            self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.2)
+            self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.05)
         except Exception:
             pass
 
@@ -843,7 +843,7 @@ class PredictCopyBot:
                 if now - last_score_update > 6 * 3600:
                     self.scorer.update_all()
                     db = load_whales_db()
-                    self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.2)
+                    self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.05)
                     last_score_update = now
                 self._save_state()
             except Exception as e:
@@ -1036,10 +1036,10 @@ class PredictCopyBot:
     def _send_telegram_whales(self):
         try:
             db = load_whales_db()
-            active = [w for w in db.values() if w.get("score", 0) >= 0.2]
+            active = [w for w in db.values() if w.get("score", 0) >= 0.05]
             active.sort(key=lambda w: w.get("score", 0), reverse=True)
             if not active:
-                tg_notifier.send_message("🐳 <b>추적 고래 없음</b>\n(score >= 0.2 고래 없음)")
+                tg_notifier.send_message("🐳 <b>추적 고래 없음</b>\n(score >= 0.05 고래 없음)")
                 return
             rows = []
             for i, w in enumerate(active[:30], 1):
