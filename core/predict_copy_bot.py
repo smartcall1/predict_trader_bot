@@ -273,8 +273,11 @@ class PredictCopyBot:
             except Exception:
                 pass  # 파싱 실패 시 통과 (방어적)
         else:
-            # boostEndsAt 없음 → 스포츠 단기 경기면 허용, 그 외 장기/투기성 차단
-            if market.get("marketVariant") != "SPORTS_TEAM_MATCH":
+            # boostEndsAt 없음 → "vs." 포함 = 스포츠 경기로 허용, 나머지는 장기/투기성 차단
+            # [BUG FIX] predict.fun API가 marketVariant 필드를 반환하지 않아 모든 마켓이 차단되던 버그 수정
+            # marketVariant 대신 제목의 "vs." 포함 여부로 스포츠 경기 판단
+            _is_sports_match = " vs." in _question_text or " vs " in _question_text
+            if not _is_sports_match:
                 print(f"[Bot] [SKIP] 장기/투기성 마켓 차단 (비스포츠+만기미상): {_question_text[:50]}")
                 return
 
