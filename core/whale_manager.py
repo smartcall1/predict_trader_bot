@@ -501,7 +501,7 @@ class WhaleWatcher:
                 new_count += 1
 
             if new_count:
-                print(f"[WhaleMgr] 대형 거래 {new_count}건 처리")
+                pass
 
             # cursor 미사용 — 매번 최신 50건 조회 (_seen_order_ids dedup으로 중복 방지)
             # after=cursor 는 시간 역방향 페이지네이션이므로 새 거래를 놓침

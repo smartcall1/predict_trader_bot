@@ -301,8 +301,8 @@ class WhaleScorer:
         # 신뢰도 보정 (20건 미만 → 비례 할인)
         confidence = min(total / 20.0, 1.0)
 
-        # 승률 점수 (65% 이하=0, 90% 이상=만점)
-        win_score = max(0.0, min((win_rate - 65.0) / 25.0, 1.0))
+        # 승률 점수 (55% 이하=0, 90% 이상=만점)
+        win_score = max(0.0, min((win_rate - 55.0) / 35.0, 1.0))
 
         # ROI 로그 스케일 (200% = 만점)
         if roi <= 0:
@@ -536,7 +536,12 @@ class WhaleScorer:
                     if result.get("category_stats"):
                         whale["category_stats"] = result["category_stats"]
                 else:
-                    failed += 1
+                    # bootstrap 고래: lb_pnl > 0이면 active 처리 (cold-start 보완)
+                    lb_pnl = whale.get("leaderboard_pnl", 0) or 0
+                    if lb_pnl > 0:
+                        whale["status"] = "active"
+                    else:
+                        failed += 1
             except Exception as e:
                 print(f"[Scorer][ERR] {addr[:8]}... 점수 갱신 실패: {e}")
                 failed += 1
