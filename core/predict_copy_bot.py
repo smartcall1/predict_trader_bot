@@ -687,12 +687,16 @@ class PredictCopyBot:
                             self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
                             continue
 
-                    # [우선순위 2] VOID 마켓 감지: 가격 0.48~0.52 고착 8회 연속
-                    if 0.48 <= current <= 0.52:
+                    # [우선순위 2] VOID 마켓 감지: 마켓 비활성 + 가격 0.48~0.52 고착 8회 연속
+                    # [BUG FIX] 진행 중(OPEN/ACTIVE) 팽팽한 경기(50:50)를 VOID로 오판단하던 버그 수정
+                    # market.status가 OPEN/ACTIVE/LIVE인 경우 VOID 판단 금지
+                    _m_status = market.get("status", "").upper()
+                    _m_is_active = _m_status in ("OPEN", "ACTIVE", "LIVE", "")
+                    if not _m_is_active and 0.48 <= current <= 0.52:
                         cnt = self._void_price_counter.get(pos_key, 0) + 1
                         self._void_price_counter[pos_key] = cnt
                         if cnt >= 8:
-                            print(f"[Bot] ⚪ VOID 감지 (가격 {current:.3f} 고착 {cnt}회): {pos_key[:12]}...")
+                            print(f"[Bot] ⚪ VOID 감지 (status={_m_status}, 가격 {current:.3f} 고착 {cnt}회): {pos_key[:12]}...")
                             # VOID: 원금 복구, W/L 미반영
                             self.bankroll += pos["size_usdc"]
                             with self._position_lock:
