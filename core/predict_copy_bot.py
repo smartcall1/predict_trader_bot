@@ -306,7 +306,8 @@ class PredictCopyBot:
                     if raw_ask > config.MAX_PRICE:
                         print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
                         return
-                    drift = abs(raw_ask - price) / max(price, 0.01)
+                    _ref_price = (1 - price) if config.CONTRARIAN_MODE else price
+                    drift = abs(raw_ask - _ref_price) / max(_ref_price, 0.01)
                     if drift > 0.25:
                         print(f"[Bot] [SKIP] 가격 이탈 {drift:.0%} (고래:{price:.3f} 현재ask:{raw_ask:.3f}): {market_id[:12]}...")
                         return
