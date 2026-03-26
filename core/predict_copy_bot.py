@@ -290,10 +290,12 @@ class PredictCopyBot:
                 return
             print(f"[Bot] [CONTRARIAN] 🔄 {_orig_outcome} → {outcome_name} 반전")
 
-        # ── Filter 6: 스프레드 과다 차단 (>15%) + 가격 이탈 방어 ──
+        # ── Filter 6: 스프레드 과다 차단 (>40%) + 가격 이탈 방어 ──
+        # predict.fun은 폴리마켓보다 유동성이 낮아 스프레드 40% 이상만 차단
+        # 실질 가격 이탈 방어는 아래 25% drift 체크로 커버
         ob = self.client.get_orderbook(market_id)
         spread = self._get_orderbook_spread(ob)
-        if spread is not None and spread > 0.15:
+        if spread is not None and spread > 0.40:
             print(f"[Bot] [SKIP] 스프레드 {spread:.1%} 과다: {market_id[:12]}...")
             return
         # 현재 오더북 ask vs 고래 거래가 25% 이상 이탈 → stale trade 차단
