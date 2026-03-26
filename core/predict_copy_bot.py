@@ -302,6 +302,9 @@ class PredictCopyBot:
                 lv = ref_levels[0]
                 ref_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
                 raw_ask = max(1.0 - ref_price, 0.01) if _is_no_outcome else ref_price
+                # CONTRARIAN: orderbook은 고래 outcome 기준 → 반전 outcome 가격으로 변환
+                if config.CONTRARIAN_MODE:
+                    raw_ask = max(1.0 - raw_ask, 0.01)
                 if raw_ask > 0:
                     if raw_ask > config.MAX_PRICE:
                         print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")

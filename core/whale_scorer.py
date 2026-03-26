@@ -531,6 +531,8 @@ class WhaleScorer:
                     score = result["score"]
                     if score >= 0.2:
                         whale["status"] = "active"
+                    elif result.get("bootstrap") and (whale.get("leaderboard_pnl", 0) or 0) > 0:
+                        whale["status"] = "active"  # 리더보드 진입 자체가 수익 증거
                     elif score < 0.45:
                         whale["status"] = "inactive"
                     if result.get("category_stats"):
