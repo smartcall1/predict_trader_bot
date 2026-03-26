@@ -132,7 +132,7 @@ class WhaleScorer:
         query = """
         query($addr: Address!, $cursor: String) {
           account(address: $addr) {
-            positions(filter: {isResolved: true}, pagination: {first: 100, after: $cursor}) {
+            positions(pagination: {first: 100, after: $cursor}) {
               edges {
                 node {
                   market { id question }
@@ -175,6 +175,8 @@ class WhaleScorer:
                 for e in edges:
                     n = e["node"]
                     pnl_usd     = float(n.get("pnlUsd") or 0)
+                    if pnl_usd == 0:
+                        continue  # 미실현/중립 포지션 스킵
                     entry_price = float(n.get("averageBuyPriceUsd") or 0)
                     shares      = float(n.get("shares") or 0) / 1e18  # BigIntString → float
                     question    = (n.get("market") or {}).get("question") or ""
