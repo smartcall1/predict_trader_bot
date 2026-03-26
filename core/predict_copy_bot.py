@@ -201,9 +201,9 @@ class PredictCopyBot:
                 # 실데이터 고래: score 기준 (데이터 축적 단계 → 0.07 이상)
                 if score > 0 and score < 0.07:
                     return
-                # 미평가 고래(score=0): vol >= $2K 이상만 허용
-                if score == 0 and lb_pnl <= 0 and vol < 2000:
-                    print(f"[Bot] [SKIP] 미평가 고래 차단 (vol=${vol:.0f}): {addr[:8]}")
+                # 미평가 고래(score=0): vol >= $500 이상만 허용
+                if score == 0 and lb_pnl <= 0 and vol < 500:
+                    print(f"[Bot] [SKIP] 미평가 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
             # DB에 없는 완전 신규 고래 → $1000 이상 거래만 허용
@@ -259,20 +259,24 @@ class PredictCopyBot:
             print(f"[Bot] [SKIP] FDV/토큰가치 마켓 차단: {_question_text[:50]}")
             return
 
-        # ── Filter 5-G: 만기 불명 / 60일 초과 장기 마켓 차단 ──
-        # boostEndsAt=null → 비부스트 마켓 = 장기/투기성 마켓 패턴 (market_debug.jsonl 검증 완료)
+        # ── Filter 5-G: 30일 초과 장기 마켓 차단 ──
+        # boostEndsAt이 있으면 날짜 기준으로 30일 초과 차단
+        # boostEndsAt=null: SPORTS_TEAM_MATCH는 단기 경기이므로 허용, 나머지는 장기/투기성으로 차단
         _boost_ends = market.get("boostEndsAt")
-        if not _boost_ends:
-            print(f"[Bot] [SKIP] 비부스트 마켓 차단 (boostEndsAt=null): {_question_text[:50]}")
-            return
-        try:
-            _end_dt = datetime.fromisoformat(str(_boost_ends).replace("Z", "+00:00"))
-            _days_left = (_end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
-            if _days_left > 60:
-                print(f"[Bot] [SKIP] 장기 마켓 차단 ({_days_left:.0f}일 남음): {_question_text[:40]}")
+        if _boost_ends:
+            try:
+                _end_dt = datetime.fromisoformat(str(_boost_ends).replace("Z", "+00:00"))
+                _days_left = (_end_dt - datetime.now(timezone.utc)).total_seconds() / 86400
+                if _days_left > 30:
+                    print(f"[Bot] [SKIP] 장기 마켓 차단 ({_days_left:.0f}일 남음): {_question_text[:40]}")
+                    return
+            except Exception:
+                pass  # 파싱 실패 시 통과 (방어적)
+        else:
+            # boostEndsAt 없음 → 스포츠 단기 경기면 허용, 그 외 장기/투기성 차단
+            if market.get("marketVariant") != "SPORTS_TEAM_MATCH":
+                print(f"[Bot] [SKIP] 장기/투기성 마켓 차단 (비스포츠+만기미상): {_question_text[:50]}")
                 return
-        except Exception:
-            pass  # 파싱 실패 시 통과 (방어적)
 
         # ── Contrarian Mode: outcome 반전 ──
         if config.CONTRARIAN_MODE:

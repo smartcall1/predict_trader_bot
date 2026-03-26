@@ -518,7 +518,7 @@ class WhaleScorer:
                         whale.pop("bootstrap", None)  # full 스코어 됐으면 bootstrap 플래그 제거
                     # status 판정
                     score = result["score"]
-                    if score >= 0.6:
+                    if score >= 0.2:
                         whale["status"] = "active"
                     elif score < 0.45:
                         whale["status"] = "inactive"
