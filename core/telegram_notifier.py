@@ -11,6 +11,7 @@ class TelegramNotifier:
         self.chat_id = config.TELEGRAM_CHAT_ID
         self.enabled = bool(self.token and self.chat_id)
         self._update_fail_count = 0
+        self.default_keyboard = None  # 모든 메시지에 기본 첨부할 Reply Keyboard
 
         if not self.enabled:
             logger.warning("Telegram Bot Token or Chat ID is missing. Notifications are disabled.")
@@ -34,8 +35,9 @@ class TelegramNotifier:
 
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {"chat_id": self.chat_id, "text": text, "parse_mode": parse_mode}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
+        effective_markup = reply_markup or self.default_keyboard
+        if effective_markup:
+            payload["reply_markup"] = effective_markup
         try:
             # 텔레그램 4096자 제한 — 초과 시 줄 단위 분할 전송
             if len(text) > 4096:

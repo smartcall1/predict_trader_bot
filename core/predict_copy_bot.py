@@ -81,11 +81,11 @@ class PredictCopyBot:
         if config.CONTRARIAN_MODE:
             mode += " CONTRARIAN"
         print(f"[Bot] PredictCopyBot 시작 ({mode}) — 초기 뱅크롤 ${self.bankroll:.2f}")
+        tg_notifier.default_keyboard = self._tg_keyboard()
         tg_notifier.send_message(
             f"🚀 <b>Predict.fun 봇 시작 [{mode}]</b>\n"
             f"💵 뱅크롤: ${self.bankroll:.2f}\n"
             f"🕒 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC",
-            reply_markup=self._tg_keyboard(),
         )
 
     # ──────────────────────────────────────────────
