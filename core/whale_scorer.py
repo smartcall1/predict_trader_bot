@@ -15,6 +15,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+from web3 import Web3
 from config import config
 
 DB_FILE      = os.path.join(config.DATA_DIR, "whales_predict.json")
@@ -124,6 +125,10 @@ class WhaleScorer:
           category: str ("sports"/"crypto"/"politics"/"other")
           timestamp: int (정확한 ts 없음 → 현재 시각 근사)
         """
+        try:
+            address = Web3.to_checksum_address(address)
+        except Exception:
+            pass
         query = """
         query($addr: Address!, $cursor: String) {
           account(address: $addr) {
@@ -208,6 +213,10 @@ class WhaleScorer:
 
     def fetch_account_stats(self, address: str) -> dict | None:
         """GraphQL account.statistics 조회 (전체 PnL/볼륨)"""
+        try:
+            address = Web3.to_checksum_address(address)
+        except Exception:
+            pass
         query = """
         query($addr: Address!) {
           account(address: $addr) {
