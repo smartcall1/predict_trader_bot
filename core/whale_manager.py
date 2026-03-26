@@ -588,8 +588,6 @@ class WhaleWatcher:
             "market":           market,
         }
 
-        print(f"[WhaleMgr] Whale {addr[:8]}... | {side} {outcome_nm} | ${size_usdt:.0f} @ {price:.3f} | {question[:30]}")
-
         # 고래 DB 업데이트
         self._update_whale_db(addr, trade_info)
 
