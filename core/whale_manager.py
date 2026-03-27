@@ -292,7 +292,9 @@ def settle_pending_trades():
                 timeout=10,
             )
             market = (r.json().get("data") or {}).get("market") or {}
-            if market.get("status") != "RESOLVED":
+            # [BUG FIX] predict.fun은 "RESOLVED" 외 "SETTLED"/"CLOSED" 등 사용 가능
+            _mstatus = (market.get("status") or "").upper()
+            if _mstatus not in ("RESOLVED", "SETTLED", "CLOSED", "COMPLETE", "COMPLETED"):
                 continue
             resolution = market.get("resolution") or {}
             winning_outcome = (resolution.get("name") or "").strip().lower()
@@ -737,9 +739,6 @@ def run_manager(client) -> WhaleWatcher:
                 # 스냅샷 저장 (scorer delta 계산용)
                 save_leaderboard_snapshot(rows)
 
-                # pending BUY 거래 정산 확인 (RESOLVED 마켓 WIN/LOSS 갱신)
-                settle_pending_trades()
-
                 # 상위 20명 현재 포지션 → overlap 맵 갱신
                 top_addrs = [r["address"] for r in rows[:20]]
                 overlap = get_overlap_positions(top_addrs, gql_session)
@@ -748,6 +747,13 @@ def run_manager(client) -> WhaleWatcher:
 
             except Exception as e:
                 print(f"[WhaleMgr] 리더보드 갱신 오류: {e}")
+
+            # [BUG FIX] settle_pending_trades를 독립 try-except로 분리
+            # 기존: 리더보드 오류 시 settle까지 통째로 스킵됨
+            try:
+                settle_pending_trades()
+            except Exception as e:
+                print(f"[WhaleMgr] settle_pending_trades 오류: {e}")
 
     threading.Thread(target=_leaderboard_refresh_loop, daemon=True).start()
 
