@@ -680,9 +680,9 @@ def run_manager(client) -> WhaleWatcher:
         first_run = True
         while True:
             try:
-                # 첫 실행은 즉시, 이후 6시간마다
+                # 첫 실행은 즉시, 이후 2시간마다 (6h→2h: 신규 고래 시드 속도 향상)
                 if not first_run:
-                    time.sleep(6 * 3600)
+                    time.sleep(2 * 3600)
                 first_run = False
 
                 rows = fetch_graphql_leaderboard(max_pages=20, min_pnl=2000.0)

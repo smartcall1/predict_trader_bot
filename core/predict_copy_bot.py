@@ -905,8 +905,8 @@ class PredictCopyBot:
         while True:
             try:
                 now = time.time()
-                # 6시간마다 고래 스코어 갱신
-                if now - last_score_update > 6 * 3600:
+                # 1시간마다 고래 스코어 갱신 (6h→1h: 나쁜 고래 조기 감지)
+                if now - last_score_update > 1 * 3600:
                     self.scorer.update_all()
                     db = load_whales_db()
                     self._active_whale_count = sum(1 for w in db.values() if w.get("score", 0) >= 0.05)
