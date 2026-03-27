@@ -42,6 +42,8 @@ class PredictCopyBot:
         self._pending_confirm = None
         self.pending_orders: list = []          # 지정가 대기 큐 (1분 관찰)
         self._void_price_counter: dict = {}     # VOID 마켓 감지 (가격 고착 카운터)
+        self._blocked_market_ids: set = set()   # [BUG FIX-P1] LOSS/VOID 후 재진입 영구 차단
+        self._seen_market_signals_file = os.path.join(config.DATA_DIR, "seen_market_signals_predict.json")
 
         # 자산
         self.bankroll = config.INITIAL_BANKROLL
@@ -59,6 +61,8 @@ class PredictCopyBot:
 
         self._startup_time = int(time.time())
         self._load_state()
+        # [BUG FIX-P2] seen_market_signals 파일 복구 (재시작 시 캐시 유지)
+        self._seen_market_signals = self._load_seen_market_signals()
 
         self.client  = PredictFunClient()
         self.scorer  = WhaleScorer()
@@ -122,6 +126,9 @@ class PredictCopyBot:
                 # 포지션 정산 체크 (60초마다)
                 if int(time.time()) % 60 < 5:
                     self._settle_positions()
+
+                # [BUG FIX-P2] seen_market_signals 주기적 저장
+                self._save_seen_market_signals()
 
                 time.sleep(2)
             except KeyboardInterrupt:
@@ -210,6 +217,11 @@ class PredictCopyBot:
             if size_usdt < 1000:
                 print(f"[Bot] [SKIP] 신규 고래 최소 크기 미달 (${size_usdt:.0f}): {addr[:8]}")
                 return
+
+        # [BUG FIX-P1] LOSS/VOID 처리된 마켓 재진입 영구 차단
+        if market_id in self._blocked_market_ids:
+            print(f"[Bot] 🚫 [SKIP] LOSS/VOID 마켓 재진입 차단: {market_id[:12]}...")
+            return
 
         # ── Filter 5: 동일 마켓 중복 진입 차단 ──
         # [Fix1-A] 이미 같은 마켓 포지션 보유 중이면 고래 무관하게 차단
@@ -569,6 +581,10 @@ class PredictCopyBot:
             self.stats["wins"] += 1
         else:
             self.stats["losses"] += 1
+            # [BUG FIX-P1] LOSS 후 동일 마켓 재진입 영구 차단
+            _loss_mid = pos.get("marketId", "")
+            if _loss_mid:
+                self._blocked_market_ids.add(_loss_mid)
 
         # ── 섀도우(반대편) PnL 계산 ──
         # 동일 금액을 반대 outcome(1 - entry_price)에 투자했을 때의 가상 수익
@@ -692,18 +708,24 @@ class PredictCopyBot:
                             self._execute_sell(pos_key, pos, current, reason="TAKE_PROFIT")
                             continue
 
-                    # [우선순위 2] VOID 마켓 감지: 마켓 비활성 + 가격 0.48~0.52 고착 8회 연속
-                    # [BUG FIX] 진행 중(OPEN/ACTIVE) 팽팽한 경기(50:50)를 VOID로 오판단하던 버그 수정
-                    # market.status가 OPEN/ACTIVE/LIVE인 경우 VOID 판단 금지
+                    # [우선순위 2] VOID 마켓 감지: 명시적 취소 상태 + 가격 0.48~0.52 고착 8회 연속
+                    # [BUG FIX-P3] 경기 종료 후 정산 대기(CLOSED/ENDED/PENDING 등)를 VOID로 오판단하던 버그 수정
+                    # 기존: "OPEN/ACTIVE/LIVE" 외 모든 상태 → VOID 후보 (너무 광범위)
+                    # 수정: 명시적 취소 상태(CANCELLED/CANCELED/VOID/INVALID)만 VOID 후보
                     _m_status = market.get("status", "").upper()
-                    _m_is_active = _m_status in ("OPEN", "ACTIVE", "LIVE", "")
-                    if not _m_is_active and 0.48 <= current <= 0.52:
+                    _m_is_cancelled = ("CANCEL" in _m_status or _m_status in ("VOID", "INVALID", "REFUNDED"))
+                    # CANCELLED가 아닌 비활성 상태(CLOSED/ENDED/PENDING_RESOLUTION 등)는 정산 대기 → VOID 금지
+                    if _m_is_cancelled and 0.48 <= current <= 0.52:
                         cnt = self._void_price_counter.get(pos_key, 0) + 1
                         self._void_price_counter[pos_key] = cnt
                         if cnt >= 8:
                             print(f"[Bot] ⚪ VOID 감지 (status={_m_status}, 가격 {current:.3f} 고착 {cnt}회): {pos_key[:12]}...")
                             # VOID: 원금 복구, W/L 미반영
                             self.bankroll += pos["size_usdc"]
+                            # [BUG FIX-P1] VOID 후 동일 마켓 재진입 영구 차단
+                            _void_mid = pos.get("marketId", "")
+                            if _void_mid:
+                                self._blocked_market_ids.add(_void_mid)
                             with self._position_lock:
                                 self.positions.pop(pos_key, None)
                             self._void_price_counter.pop(pos_key, None)
@@ -805,6 +827,30 @@ class PredictCopyBot:
         with open(self.trade_log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    def _load_seen_market_signals(self) -> dict:
+        """[BUG FIX-P2] 재시작 시 seen_market_signals 파일 복구 (만료 항목 제거)"""
+        try:
+            if os.path.exists(self._seen_market_signals_file):
+                with open(self._seen_market_signals_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                cutoff = int(time.time()) - 900
+                valid = {k: v for k, v in data.items() if v > cutoff}
+                print(f"[BUG FIX-P2] seen_market_signals 복구: {len(valid)}건 로드")
+                return valid
+        except Exception:
+            pass
+        return {}
+
+    def _save_seen_market_signals(self):
+        """[BUG FIX-P2] seen_market_signals 파일 저장"""
+        try:
+            tmp = self._seen_market_signals_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._seen_market_signals, f)
+            os.replace(tmp, self._seen_market_signals_file)
+        except Exception as e:
+            print(f"[Bot][WARN] seen_market_signals 저장 실패: {e}")
+
     def _save_state(self):
         now = time.time()
         if now - self._last_save_time < 10:
@@ -816,6 +862,7 @@ class PredictCopyBot:
             "stats": self.stats,
             "positions": self.positions,
             "seen_txs": list(self.seen_txs.keys())[-1000:],
+            "blocked_market_ids": list(self._blocked_market_ids),
         }
         tmp = self.state_file_path + ".tmp"
         try:
@@ -841,6 +888,8 @@ class PredictCopyBot:
             self.positions     = state.get("positions", {})
             for tx in state.get("seen_txs", []):
                 self.seen_txs[tx] = 0
+            # [BUG FIX-P1] LOSS/VOID 차단 마켓 복구
+            self._blocked_market_ids = set(state.get("blocked_market_ids", []))
             # _startup_time 유지 — 백로그 차단 방어선 보존 (None 으로 해제하지 않음)
             print(f"[Bot] 상태 복구: 포지션 {len(self.positions)}개, PnL ${self.stats['total_pnl']:.2f}")
         except Exception as e:
