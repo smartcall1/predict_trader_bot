@@ -372,8 +372,10 @@ class PredictCopyBot:
             print(f"[Bot] [SKIP] 동일 마켓 이미 대기열에 등록됨 (중복 pending 차단)")
             return
 
-        # ── 대기열 등록 (1분 관찰, 목표가 = 고래가 + 슬리피지) ──
-        target_price = min(0.99, price * (1 + config.DEFAULT_SLIPPAGE_BPS / 10_000))
+        # ── 대기열 등록 (1분 관찰, 목표가 = 실제 진입가 + 슬리피지) ──
+        # CONTRARIAN: 고래 YES 0.70 → 봇 NO 0.30, target_price도 NO 기준
+        _entry_price = (1.0 - price) if config.CONTRARIAN_MODE else price
+        target_price = min(0.99, _entry_price * (1 + config.DEFAULT_SLIPPAGE_BPS / 10_000))
         _ud_str = f" ×역배{_underdog_factor:.0%}" if _underdog_factor < 1.0 else ""
         _wt_str = f" ×점수{_weight:.0%}" if _weight < 1.0 else ""
         print(f"⏳ [PENDING] 🐋 {whale_name} 픽 감지 -> 대기열 등록 (1분 관찰, 목표가 ${target_price:.3f}, 배팅 ${bet_size:.2f}{_ud_str}{_wt_str})")
@@ -383,7 +385,7 @@ class PredictCopyBot:
             "market_id": market_id,
             "whale_name": whale_name,
             "whale_addr": addr,
-            "whale_price": price,
+            "whale_price": _entry_price,  # CONTRARIAN: 반전된 가격 (NO side)
             "target_price": target_price,
             "bet_size": bet_size,
             "outcome_name": outcome_name,
@@ -393,6 +395,9 @@ class PredictCopyBot:
 
     def _handle_mirror_exit(self, addr: str, market_id: str, price: float):
         """고래 SELL 감지 → 동일 마켓 동방향 포지션 조기 청산 (이익/본전일 때만)"""
+        # CONTRARIAN: 고래 매도 = 우리 반대 포지션에 유리한 방향 → 조기청산 불필요
+        if config.CONTRARIAN_MODE:
+            return
         for pos_key, pos in list(self.positions.items()):
             if pos.get("marketId") != market_id:
                 continue
