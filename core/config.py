@@ -53,6 +53,7 @@ class Config:
     PAPER_TRADING    = os.getenv("PAPER_TRADING", "True").lower() == "true"
     DEBUG_MODE       = os.getenv("DEBUG_MODE", "True").lower() == "true"
     CONTRARIAN_MODE  = os.getenv("CONTRARIAN_MODE", "False").lower() == "true"
+    REQUIRE_PROVEN_PNL = os.getenv("REQUIRE_PROVEN_PNL", "False").lower() == "true"  # PnL $0 고래 차단
 
     # === Telegram 알림 ===
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
