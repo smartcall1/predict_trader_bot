@@ -96,6 +96,17 @@ class PredictCopyBot:
     # Contrarian 유틸리티
     # ──────────────────────────────────────────────
 
+    @staticmethod
+    def _is_complement_outcome(outcome_name: str, outcomes: list) -> bool:
+        """해당 outcome이 오더북 기준 2번(complement)인지 판별.
+        complement면 오더북 가격을 1-price로 반전해야 함."""
+        if outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER"):
+            return True
+        if len(outcomes) == 2:
+            first = (outcomes[0].get("name", "") if outcomes else "").upper()
+            return outcome_name.upper() != first
+        return False
+
     def _resolve_contrarian_outcome(self, market: dict, original_outcome_name: str) -> tuple:
         """반대 outcome의 (name, token_id) 반환. 바이너리 마켓(2 outcomes) 전용."""
         outcomes = market.get("outcomes", [])
@@ -317,17 +328,15 @@ class PredictCopyBot:
             print(f"[Bot] [SKIP] 스프레드 {spread:.1%} 과다: {market_id[:12]}...")
             return
         # 현재 오더북 ask vs 고래 거래가 25% 이상 이탈 → stale trade 차단
-        # No/Down 결과물은 "1 - best_bid"가 실제 진입가이므로 bids 기준으로 계산
-        _is_no_outcome = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
+        # complement(No/2번팀): bids 기준 1-ref로 가격 산출
+        # primary(Yes/1번팀): asks 기준 직접 사용
+        _is_complement_f6 = self._is_complement_outcome(outcome_name, market.get("outcomes", []))
         if ob:
-            ref_levels = ob.get("bids", []) if _is_no_outcome else ob.get("asks", [])
+            ref_levels = ob.get("bids", []) if _is_complement_f6 else ob.get("asks", [])
             if ref_levels:
                 lv = ref_levels[0]
                 ref_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
-                raw_ask = max(1.0 - ref_price, 0.01) if _is_no_outcome else ref_price
-                # CONTRARIAN: orderbook은 고래 outcome 기준 → 반전 outcome 가격으로 변환
-                if config.CONTRARIAN_MODE:
-                    raw_ask = max(1.0 - raw_ask, 0.01)
+                raw_ask = max(1.0 - ref_price, 0.01) if _is_complement_f6 else ref_price
                 if raw_ask > 0:
                     if raw_ask > config.MAX_PRICE:
                         print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
@@ -460,13 +469,8 @@ class PredictCopyBot:
             # 현재 best_ask 조회
             # 오더북은 마켓의 1번 아웃컴(primary) 기준으로 asks/bids 반환
             # 2번 아웃컴(complement) 매수가 = 1 - primary_best_bid
-            _is_no = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
-            _outcomes = order.get("market", {}).get("outcomes", [])
-            _first_outcome = (_outcomes[0].get("name", "") if _outcomes else "").upper()
-            _is_complement = (
-                _is_no
-                or (len(_outcomes) == 2 and outcome_name.upper() != _first_outcome)
-            )
+            _is_complement = self._is_complement_outcome(
+                outcome_name, order.get("market", {}).get("outcomes", []))
             if _is_complement:
                 yes_bid = self.client.get_best_price(market_id, side="SELL")
                 current_ask = round(1.0 - yes_bid, 4) if yes_bid is not None else None
@@ -533,12 +537,7 @@ class PredictCopyBot:
                 self.bankroll += bet_size  # 이미 차감된 경우 복구
                 return
             # 2번 아웃컴(complement) 여부 판별 — 오더북 가격 조회 시 반전 필요
-            _outcomes = market.get("outcomes", [])
-            _first_out = (_outcomes[0].get("name", "") if _outcomes else "").upper()
-            _is_complement = (
-                outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
-                or (len(_outcomes) == 2 and outcome_name.upper() != _first_out)
-            )
+            _is_complement = self._is_complement_outcome(outcome_name, market.get("outcomes", []))
             self.positions[pos_key] = {
                 "marketId":     market_id,
                 "whale_addr":   whale_addr,
@@ -698,19 +697,20 @@ class PredictCopyBot:
                     else:
                         # resolution name 없으면 현재가 기준
                         _r_complement = pos.get("is_complement",
-                            pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER"))
+                            self._is_complement_outcome(pos.get("outcome_name", ""), market.get("outcomes", [])))
                         if _r_complement:
                             _r_ask = self.client.get_best_price(pos["marketId"], side="BUY")
-                            current = round(1.0 - _r_ask, 4) if _r_ask is not None else pos["entry_price"]
+                            current = round(1.0 - _r_ask, 4) if _r_ask and _r_ask > 0.02 else pos["entry_price"]
                         else:
-                            current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
+                            _r_bid = self.client.get_best_price(pos["marketId"], side="SELL")
+                            current = _r_bid if _r_bid and _r_bid > 0.02 else pos["entry_price"]
                         reason = "WIN" if current >= 0.95 else "LOSS"
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
                 # 현재가 조회 (complement 결과물: 현재가 = 1 - primary ask)
                 _pos_is_complement = pos.get("is_complement",
-                    pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER"))
+                    self._is_complement_outcome(pos.get("outcome_name", ""), market.get("outcomes", [])))
                 if _pos_is_complement:
                     yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
                     current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
