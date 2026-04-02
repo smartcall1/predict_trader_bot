@@ -458,8 +458,16 @@ class PredictCopyBot:
             outcome_name = order.get("outcome_name", "")
 
             # 현재 best_ask 조회
+            # 오더북은 마켓의 1번 아웃컴(primary) 기준으로 asks/bids 반환
+            # 2번 아웃컴(complement) 매수가 = 1 - primary_best_bid
             _is_no = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
-            if _is_no:
+            _outcomes = order.get("market", {}).get("outcomes", [])
+            _first_outcome = (_outcomes[0].get("name", "") if _outcomes else "").upper()
+            _is_complement = (
+                _is_no
+                or (len(_outcomes) == 2 and outcome_name.upper() != _first_outcome)
+            )
+            if _is_complement:
                 yes_bid = self.client.get_best_price(market_id, side="SELL")
                 current_ask = round(1.0 - yes_bid, 4) if yes_bid is not None else None
             else:
@@ -524,6 +532,13 @@ class PredictCopyBot:
                 print(f"[Bot] [SKIP] Lock 내 중복 감지 → 체결 취소: {market_id[:12]}...")
                 self.bankroll += bet_size  # 이미 차감된 경우 복구
                 return
+            # 2번 아웃컴(complement) 여부 판별 — 오더북 가격 조회 시 반전 필요
+            _outcomes = market.get("outcomes", [])
+            _first_out = (_outcomes[0].get("name", "") if _outcomes else "").upper()
+            _is_complement = (
+                outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
+                or (len(_outcomes) == 2 and outcome_name.upper() != _first_out)
+            )
             self.positions[pos_key] = {
                 "marketId":     market_id,
                 "whale_addr":   whale_addr,
@@ -537,6 +552,7 @@ class PredictCopyBot:
                 "outcome_name": outcome_name,
                 "token_id":     token_id,
                 "end_date":     market.get("boostEndsAt"),
+                "is_complement": _is_complement,
             }
 
         self.bankroll -= bet_size
@@ -681,14 +697,21 @@ class PredictCopyBot:
                         current = 1.0 if reason == "WIN" else 0.0
                     else:
                         # resolution name 없으면 현재가 기준
-                        current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
+                        _r_complement = pos.get("is_complement",
+                            pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER"))
+                        if _r_complement:
+                            _r_ask = self.client.get_best_price(pos["marketId"], side="BUY")
+                            current = round(1.0 - _r_ask, 4) if _r_ask is not None else pos["entry_price"]
+                        else:
+                            current = self.client.get_best_price(pos["marketId"], side="SELL") or pos["entry_price"]
                         reason = "WIN" if current >= 0.95 else "LOSS"
                     self._execute_sell(pos_key, pos, current, reason=reason)
                     continue
 
-                # 현재가 조회 (No 결과물: 현재가 = 1 - YES ask)
-                _pos_is_no = pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER")
-                if _pos_is_no:
+                # 현재가 조회 (complement 결과물: 현재가 = 1 - primary ask)
+                _pos_is_complement = pos.get("is_complement",
+                    pos.get("outcome_name", "").upper() in ("NO", "DOWN", "BELOW", "UNDER"))
+                if _pos_is_complement:
                     yes_ask = self.client.get_best_price(pos["marketId"], side="BUY")
                     current = round(1.0 - yes_ask, 4) if yes_ask is not None else None
                 else:

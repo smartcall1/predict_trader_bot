@@ -238,14 +238,29 @@ class PredictFunClient:
             bps = slippage_bps if slippage_bps is not None else config.DEFAULT_SLIPPAGE_BPS
             _is_no = outcome_name.upper() in ("NO", "DOWN", "BELOW", "UNDER")
 
+            # 오더북은 마켓 1번 아웃컴(primary) 기준
+            # 2번 아웃컴(complement) = 1 - primary 가격
+            _mkt_data = None
+            _is_complement = _is_no
+            if not _is_no:
+                try:
+                    _mkt_data = self.get_market(market_id)
+                    _outcomes = (_mkt_data or {}).get("outcomes", [])
+                    if len(_outcomes) == 2:
+                        _first = (_outcomes[0].get("name", "")).upper()
+                        if outcome_name.upper() != _first:
+                            _is_complement = True
+                except Exception:
+                    pass
+
             # 실제 오더북 호가 조회
-            # No 결과물: BUY→(1-best_bid), SELL→(1-best_ask)
-            # Yes 결과물: BUY→best_ask, SELL→best_bid
+            # complement(No/2번팀): BUY→(1-best_bid), SELL→(1-best_ask)
+            # primary(Yes/1번팀): BUY→best_ask, SELL→best_bid
             actual_price = price
             try:
                 ob = self.get_orderbook(market_id)
                 if ob:
-                    if _is_no:
+                    if _is_complement:
                         ref_key = "bids" if side == 0 else "asks"
                         levels = ob.get(ref_key, [])
                         if levels:
@@ -270,8 +285,8 @@ class PredictFunClient:
             # 수수료 차감 (마켓별 feeRateBps, 기본 200bps=2%)
             fee_bps = 200
             try:
-                mkt = self.get_market(market_id)
-                fee_bps = int((mkt or {}).get("feeRateBps", 200))
+                _fee_mkt = _mkt_data or self.get_market(market_id)
+                fee_bps = int((_fee_mkt or {}).get("feeRateBps", 200))
             except Exception:
                 pass
             fee = size_usdt * fee_bps / 10_000
