@@ -90,6 +90,7 @@ class WhaleScorer:
         return {}
 
     def save_db(self, db: dict):
+        os.makedirs(os.path.dirname(self.db_file), exist_ok=True)
         bak = self.db_file + ".bak"
         if os.path.exists(self.db_file):
             try:
@@ -399,8 +400,12 @@ class WhaleScorer:
         """
         lb_pnl = (whale_info or {}).get("leaderboard_pnl", 0) or 0
         vol    = (whale_info or {}).get("total_volume", 0) or 0
+        # [FIX2] lb_pnl=0이라도 거래 볼륨 $2000+ 이면 최소 점수 부여 (REST 폴링 발견 고래)
         if lb_pnl <= 0:
-            return None
+            if vol >= 2000:
+                lb_pnl = vol * 0.05  # 보수적 추정: ROI 5% 가정
+            else:
+                return None
 
         # PNL 규모별 계단식 기본 점수 (리더보드 진입 자체가 수익성 증거)
         # [Fix] 상한을 0.15로 낮춤 — 실데이터 스코어(최대 ~0.14)와 역전 방지
@@ -508,17 +513,28 @@ class WhaleScorer:
 
         for addr, whale in list(db.items()):
             try:
-                # leaderboard_pnl 없는 고래는 predict.fun 계정 미등록 → GraphQL 조회 불필요
                 lb_pnl = whale.get("leaderboard_pnl", 0) or 0
                 db_trades = whale.get("trades", [])
                 db_resolved = [t for t in db_trades if t.get("action") in ("WIN", "LOSS")]
+
                 # [Fix] DB에 실데이터(WIN/LOSS) 5건 이상이면 GraphQL 조회 불필요 — 실데이터 우선
+                trades = None
                 if lb_pnl > 0 and len(db_resolved) < config.MIN_TRADES:
                     trades = self.fetch_resolved_positions(addr)
-                else:
-                    trades = db_trades
+                    # [FIX2] GraphQL 실패(502 등) 시 account stats fallback
+                    if not trades:
+                        stats = self.fetch_account_stats(addr)
+                        if stats:
+                            _gql_pnl = float(stats.get("pnlUsd") or 0)
+                            _gql_vol = float(stats.get("volumeUsd") or 0)
+                            if _gql_pnl > 0:
+                                whale["leaderboard_pnl"] = round(_gql_pnl, 2)
+                                whale["total_volume"] = max(whale.get("total_volume", 0), round(_gql_vol, 2))
+                                lb_pnl = _gql_pnl
+
                 if not trades:
-                    trades = db_trades
+                    trades = db_trades if db_trades else []
+
                 result = self.score_whale(addr, trades, whale_info=whale)
                 if result:
                     whale.update(result)

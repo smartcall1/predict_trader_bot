@@ -208,24 +208,24 @@ class PredictCopyBot:
             vol = whale_info.get("total_volume", 0) or 0
 
             # ── Filter 4-P: PnL 미검증 고래 차단 (CONTRARIAN 실험용) ──
-            # REQUIRE_PROVEN_PNL=true 시, leaderboard_pnl이 없는 고래 카피 제외
-            if config.REQUIRE_PROVEN_PNL and lb_pnl <= 0:
-                print(f"[Bot] [SKIP] PnL 미검증 고래 차단 (lb_pnl=${lb_pnl:.0f}): {addr[:8]}")
+            # [FIX3] REQUIRE_PROVEN_PNL: lb_pnl=0이라도 거래 규모 $500+ or 현재 거래 $500+ 이면 통과
+            if config.REQUIRE_PROVEN_PNL and lb_pnl <= 0 and vol < 500 and size_usdt < 500:
+                print(f"[Bot] [SKIP] PnL 미검증 소형 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
                 return
 
             if is_bootstrap:
                 # bootstrap 고래: 리더보드 PnL 기준으로 판단 (score 기준 아님)
-                # lb_pnl $5000 이상만 허용 — 검증 안 된 고래 최소 필터
-                if lb_pnl < 5000:
+                # [FIX3] $5000 → $2000 완화 (데이터 축적 단계)
+                if lb_pnl < 2000:
                     print(f"[Bot] [SKIP] bootstrap 고래 lb_pnl 미달 (${lb_pnl:.0f}): {addr[:8]}")
                     return
             else:
                 # 실데이터 고래: score 기준 (데이터 축적 단계 → 0.07 이상)
                 if score > 0 and score < 0.07:
                     return
-                # 미평가 고래(score=0): vol >= $500 이상만 허용
-                if score == 0 and lb_pnl <= 0 and vol < 500:
-                    print(f"[Bot] [SKIP] 미평가 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
+                # [FIX3] 미평가 고래: 현재 거래 크기도 고려 (대형 거래 $500+ 통과)
+                if score == 0 and lb_pnl <= 0 and vol < 500 and size_usdt < 500:
+                    print(f"[Bot] [SKIP] 미평가 소형 고래 차단 (lb_pnl=${lb_pnl:.0f}, vol=${vol:.0f}): {addr[:8]}")
                     return
         else:
             # DB에 없는 완전 신규 고래 → $1000 이상 거래만 허용

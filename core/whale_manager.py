@@ -129,6 +129,7 @@ def load_whales_db() -> dict:
 
 
 def save_whales_db(db: dict):
+    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
     bak = DB_FILE + ".bak"
     if os.path.exists(DB_FILE):
         try:
