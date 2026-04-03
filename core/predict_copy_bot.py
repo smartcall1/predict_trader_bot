@@ -195,10 +195,8 @@ class PredictCopyBot:
         if _filter_price < config.MIN_PRICE or _filter_price > config.MAX_PRICE:
             return
 
-        # ── Filter 3.5: 0.50~0.60 구간 차단 (수익성 불명확 구간) ──
-        if 0.50 <= _filter_price <= 0.60:
-            print(f"[Bot] [SKIP] 0.50~0.60 가격 구간 차단: {_filter_price:.3f}")
-            return
+        # ── Filter 3.5: 0.50~0.60 구간 차단 해제 (2026-04-03) ──
+        # 전체 시그널 22% 차단 → 수익 기회 손실이 더 크므로 비활성화
 
         # ── Filter 4: 고래 스코어 확인 ──
         db = load_whales_db()
@@ -289,8 +287,8 @@ class PredictCopyBot:
             return
 
         # ── Filter 5-G: 30일 초과 장기 마켓 차단 ──
-        # boostEndsAt이 있으면 날짜 기준으로 30일 초과 차단
-        # boostEndsAt=null: SPORTS_TEAM_MATCH는 단기 경기이므로 허용, 나머지는 장기/투기성으로 차단
+        # boostEndsAt 있을 때만 30일 초과 차단. null이면 통과 (2026-04-03 수정)
+        # 기존: boostEndsAt=null + 비스포츠 → 전부 차단 → predict.fun 마켓 대부분 차단되는 버그
         _boost_ends = market.get("boostEndsAt")
         if _boost_ends:
             try:
@@ -301,14 +299,6 @@ class PredictCopyBot:
                     return
             except Exception:
                 pass  # 파싱 실패 시 통과 (방어적)
-        else:
-            # boostEndsAt 없음 → "vs." 포함 = 스포츠 경기로 허용, 나머지는 장기/투기성 차단
-            # [BUG FIX] predict.fun API가 marketVariant 필드를 반환하지 않아 모든 마켓이 차단되던 버그 수정
-            # marketVariant 대신 제목의 "vs." 포함 여부로 스포츠 경기 판단
-            _is_sports_match = " vs." in _question_text or " vs " in _question_text
-            if not _is_sports_match:
-                print(f"[Bot] [SKIP] 장기/투기성 마켓 차단 (비스포츠+만기미상): {_question_text[:50]}")
-                return
 
         # ── Contrarian Mode: outcome 반전 ──
         if config.CONTRARIAN_MODE:
