@@ -317,25 +317,29 @@ class PredictCopyBot:
         if spread is not None and spread > 0.40:
             print(f"[Bot] [SKIP] 스프레드 {spread:.1%} 과다: {market_id[:12]}...")
             return
-        # 현재 오더북 ask vs 고래 거래가 25% 이상 이탈 → stale trade 차단
-        # complement(No/2번팀): bids 기준 1-ref로 가격 산출
-        # primary(Yes/1번팀): asks 기준 직접 사용
-        _is_complement_f6 = self._is_complement_outcome(outcome_name, market.get("outcomes", []))
+        # 현재 오더북 vs 예상 진입가 25% 이상 이탈 → stale trade 차단
+        # [FIX 2026-04-03] outcomes 배열 순서 ≠ 오더북 primary 순서 → 양쪽 다 확인
+        _ref_price = (1 - price) if config.CONTRARIAN_MODE else price
         if ob:
-            ref_levels = ob.get("bids", []) if _is_complement_f6 else ob.get("asks", [])
-            if ref_levels:
-                lv = ref_levels[0]
-                ref_price = float(lv[0]) if isinstance(lv, (list, tuple)) else float(lv.get("price") or lv.get("p") or 0)
-                raw_ask = max(1.0 - ref_price, 0.01) if _is_complement_f6 else ref_price
-                if raw_ask > 0:
-                    if raw_ask > config.MAX_PRICE:
-                        print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
-                        return
-                    _ref_price = (1 - price) if config.CONTRARIAN_MODE else price
-                    drift = abs(raw_ask - _ref_price) / max(_ref_price, 0.01)
-                    if drift > 0.25:
-                        print(f"[Bot] [SKIP] 가격 이탈 {drift:.0%} (고래:{price:.3f} 현재ask:{raw_ask:.3f}): {market_id[:12]}...")
-                        return
+            _best_prices = []
+            for _side_key in ("asks", "bids"):
+                _lvs = ob.get(_side_key, [])
+                if _lvs:
+                    _lv = _lvs[0]
+                    _p = float(_lv[0]) if isinstance(_lv, (list, tuple)) else float(_lv.get("price") or _lv.get("p") or 0)
+                    if _p > 0:
+                        _best_prices.append(_p)
+                        _best_prices.append(max(1.0 - _p, 0.01))
+            if _best_prices:
+                # _ref_price에 가장 가까운 오더북 가격을 raw_ask로 사용
+                raw_ask = min(_best_prices, key=lambda p: abs(p - _ref_price))
+                if raw_ask > config.MAX_PRICE:
+                    print(f"[Bot] [SKIP] 현재 ask {raw_ask:.3f} > MAX_PRICE: {market_id[:12]}...")
+                    return
+                drift = abs(raw_ask - _ref_price) / max(_ref_price, 0.01)
+                if drift > 0.25:
+                    print(f"[Bot] [SKIP] 가격 이탈 {drift:.0%} (기대:{_ref_price:.3f} 현재:{raw_ask:.3f}): {market_id[:12]}...")
+                    return
 
         # ── 베팅금 계산 ──
         portfolio = self._get_portfolio()
